@@ -511,3 +511,131 @@ class DatabaseManager:
                 dict(row)
                 for row in cursor.fetchall()
             ]
+
+    def get_event_groups(
+        self,
+        session_id: int,
+        limit: int = 100,
+    ) -> List[Dict]:
+        """
+        Aynı izleme çalışmasındaki olayları hedef yoluna göre gruplar.
+
+        Her grup için son olay, toplam olay sayısı,
+        ilk-son görülme zamanı ve en yüksek riski döndürür.
+        """
+        if limit < 1:
+            raise ValueError(
+                "Grup limiti en az 1 olmalıdır."
+            )
+
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                WITH ranked_events AS (
+                    SELECT
+                        id,
+                        timestamp,
+                        event_type,
+                        risk_level,
+                        target_path,
+                        description,
+                        session_id,
+
+                        ROW_NUMBER() OVER (
+                            PARTITION BY target_path
+                            ORDER BY id DESC
+                        ) AS row_number,
+
+                        COUNT(*) OVER (
+                            PARTITION BY target_path
+                        ) AS event_count,
+
+                        MIN(timestamp) OVER (
+                            PARTITION BY target_path
+                        ) AS first_seen,
+
+                        MAX(timestamp) OVER (
+                            PARTITION BY target_path
+                        ) AS last_seen,
+
+                        MAX(
+                            CASE risk_level
+                                WHEN 'HIGH' THEN 3
+                                WHEN 'MEDIUM' THEN 2
+                                ELSE 1
+                            END
+                        ) OVER (
+                            PARTITION BY target_path
+                        ) AS highest_risk_score
+
+                    FROM security_events
+                    WHERE session_id = ?
+                )
+
+                SELECT
+                    id,
+                    timestamp,
+                    event_type,
+                    risk_level AS latest_risk,
+
+                    CASE highest_risk_score
+                        WHEN 3 THEN 'HIGH'
+                        WHEN 2 THEN 'MEDIUM'
+                        ELSE 'LOW'
+                    END AS highest_risk,
+
+                    target_path,
+                    description,
+                    session_id,
+                    event_count,
+                    first_seen,
+                    last_seen
+
+                FROM ranked_events
+                WHERE row_number = 1
+                ORDER BY id DESC
+                LIMIT ?
+            """, (
+                session_id,
+                limit,
+            ))
+
+            return [
+                dict(row)
+                for row in cursor.fetchall()
+            ]
+
+    def get_events_for_target(
+        self,
+        session_id: int,
+        target_path: str,
+        limit: int = 200,
+    ) -> List[Dict]:
+        """Bir hedefe ait ayrıntılı olay geçmişini döndürür."""
+        if limit < 1:
+            raise ValueError(
+                "Olay limiti en az 1 olmalıdır."
+            )
+
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                SELECT *
+                FROM security_events
+                WHERE
+                    session_id = ?
+                    AND target_path = ?
+                ORDER BY id DESC
+                LIMIT ?
+            """, (
+                session_id,
+                target_path,
+                limit,
+            ))
+
+            return [
+                dict(row)
+                for row in cursor.fetchall()
+            ]

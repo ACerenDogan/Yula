@@ -224,6 +224,130 @@ class TestDatabaseManager(unittest.TestCase):
                 events[0]["timestamp"],
             )
 
+    def test_ayni_hedefin_olaylarini_gruplar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(
+                os.path.join(directory, "test.db")
+            )
+
+            target_path = "/project/app.py"
+
+            session_id = database.create_monitoring_session([
+                {
+                    "path": target_path,
+                    "type": "FILE",
+                },
+            ])
+
+            database.log_security_event(
+                event_type="MODIFIED",
+                risk_level="LOW",
+                target_path=target_path,
+                description="İlk değişiklik",
+                session_id=session_id,
+            )
+
+            database.log_security_event(
+                event_type="MODIFIED",
+                risk_level="HIGH",
+                target_path=target_path,
+                description="Kritik değişiklik",
+                session_id=session_id,
+            )
+
+            database.log_security_event(
+                event_type="RESTORED",
+                risk_level="LOW",
+                target_path=target_path,
+                description="Baseline durumuna döndü",
+                session_id=session_id,
+            )
+
+            groups = database.get_event_groups(
+                session_id=session_id
+            )
+
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(
+                groups[0]["target_path"],
+                target_path,
+            )
+            self.assertEqual(
+                groups[0]["event_count"],
+                3,
+            )
+            self.assertEqual(
+                groups[0]["highest_risk"],
+                "HIGH",
+            )
+            self.assertEqual(
+                groups[0]["event_type"],
+                "RESTORED",
+            )
+            self.assertEqual(
+                groups[0]["description"],
+                "Baseline durumuna döndü",
+            )
+
+            events = database.get_events_for_target(
+                session_id=session_id,
+                target_path=target_path,
+            )
+
+            self.assertEqual(len(events), 3)
+
+    def test_gruplar_farkli_izleme_calismalarini_karistirmaz(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(
+                os.path.join(directory, "test.db")
+            )
+
+            target_path = "/project/app.py"
+
+            first_session = (
+                database.create_monitoring_session([
+                    {
+                        "path": target_path,
+                        "type": "FILE",
+                    },
+                ])
+            )
+
+            second_session = (
+                database.create_monitoring_session([
+                    {
+                        "path": target_path,
+                        "type": "FILE",
+                    },
+                ])
+            )
+
+            database.log_security_event(
+                event_type="MODIFIED",
+                risk_level="HIGH",
+                target_path=target_path,
+                description="Birinci çalışma",
+                session_id=first_session,
+            )
+
+            database.log_security_event(
+                event_type="RESTORED",
+                risk_level="LOW",
+                target_path=target_path,
+                description="İkinci çalışma",
+                session_id=second_session,
+            )
+
+            first_groups = database.get_event_groups(
+                session_id=first_session
+            )
+
+            self.assertEqual(len(first_groups), 1)
+            self.assertEqual(
+                first_groups[0]["description"],
+                "Birinci çalışma",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
