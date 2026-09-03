@@ -1,5 +1,7 @@
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, List
 
@@ -30,13 +32,30 @@ class DatabaseManager:
         self.db_path = os.path.abspath(db_path)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Yeni ve güvenli bir SQLite bağlantısı oluşturur."""
+    @contextmanager
+    def _get_connection(
+        self,
+    ) -> Iterator[sqlite3.Connection]:
+        """
+        SQLite bağlantısını açar ve işlem bitince kesin olarak kapatır.
+
+        İşlem başarılıysa commit, hatalıysa rollback yapılır.
+        """
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
-        return connection
+
+        try:
+            yield connection
+            connection.commit()
+
+        except Exception:
+            connection.rollback()
+            raise
+
+        finally:
+            connection.close()
 
     def _init_db(self) -> None:
         """
