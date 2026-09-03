@@ -5,28 +5,33 @@ from typing import Dict, List
 
 
 class DatabaseManager:
-    """
-    Yula yerel SQLite veritabanı yönetim sınıfı.
+    """Yula yerel SQLite veritabanı yönetim sınıfı."""
 
-    İzlenen yolları, baseline kayıtlarını, izleme oturumlarını
-    ve güvenlik olaylarını saklar.
-    """
+    SESSION_STATUSES = {
+        "PREPARING",
+        "RUNNING",
+        "STOPPED",
+        "ERROR",
+    }
+
+    SESSION_TRANSITIONS = {
+        "PREPARING": {"RUNNING", "STOPPED", "ERROR"},
+        "RUNNING": {"STOPPED", "ERROR"},
+        "STOPPED": set(),
+        "ERROR": set(),
+    }
+
+    TARGET_TYPES = {
+        "FILE",
+        "DIRECTORY",
+    }
 
     def __init__(self, db_path: str = "yula.db"):
         self.db_path = os.path.abspath(db_path)
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """
-        Yeni bir SQLite bağlantısı oluşturur.
-
-        foreign_keys:
-            SQLite foreign key kontrollerini etkinleştirir.
-
-        busy_timeout:
-            Başka bir işlem veritabanını kullanıyorsa hemen hata vermek
-            yerine beş saniyeye kadar bekler.
-        """
+        """Yeni ve güvenli bir SQLite bağlantısı oluşturur."""
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -41,7 +46,6 @@ class DatabaseManager:
         with self._get_connection() as connection:
             cursor = connection.cursor()
 
-            # 1. İzlenen yollar
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS monitored_paths (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +54,6 @@ class DatabaseManager:
                 )
             """)
 
-            # 2. Güvenilir dosya parmak izleri
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS file_baselines (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +71,6 @@ class DatabaseManager:
                 )
             """)
 
-            # 3. İzleme oturumları
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS monitoring_sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,7 +88,6 @@ class DatabaseManager:
                 )
             """)
 
-            # 4. Her oturumda seçilen dosya ve klasörler
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS session_targets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +106,6 @@ class DatabaseManager:
                 )
             """)
 
-            # 5. Güvenlik olayları
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS security_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,8 +121,6 @@ class DatabaseManager:
                 )
             """)
 
-            # Eski security_events tablosunda session_id olmayabilir.
-            # Bu kontrol mevcut kayıtları silmeden sütunu ekler.
             event_columns = {
                 row["name"]
                 for row in cursor.execute(
@@ -137,7 +135,6 @@ class DatabaseManager:
                     REFERENCES monitoring_sessions(id)
                 """)
 
-            # Oturuma göre olay sorgularını hızlandırır.
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS
                 idx_security_events_session_id
@@ -146,10 +143,203 @@ class DatabaseManager:
 
             connection.commit()
 
+    def create_monitoring_session(
+        self,
+        targets: List[Dict[str, str]],
+    ) -> int:
+        """
+        PREPARING durumunda yeni bir izleme oturumu oluşturur.
+
+        Örnek targets:
+
+        [
+            {"path": "/project/app.py", "type": "FILE"},
+            {"path": "/project/config", "type": "DIRECTORY"},
+        ]
+        """
+        if not targets:
+            raise ValueError(
+                "İzleme oturumu için en az bir hedef gereklidir."
+            )
+
+        normalized_targets = []
+        seen_paths = set()
+
+        for target in targets:
+            target_path = target.get("path")
+            target_type = target.get("type", "").upper()
+
+            if not isinstance(target_path, str) or not target_path.strip():
+                raise ValueError(
+                    "Her izleme hedefinin geçerli bir yolu olmalıdır."
+                )
+
+            if target_type not in self.TARGET_TYPES:
+                raise ValueError(
+                    "Hedef tipi FILE veya DIRECTORY olmalıdır."
+                )
+
+            normalized_path = os.path.abspath(
+                os.path.expanduser(target_path)
+            )
+
+            if normalized_path in seen_paths:
+                continue
+
+            seen_paths.add(normalized_path)
+
+            normalized_targets.append({
+                "path": normalized_path,
+                "type": target_type,
+            })
+
+        started_at = datetime.now().isoformat(
+            timespec="milliseconds"
+        )
+
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                INSERT INTO monitoring_sessions (
+                    started_at,
+                    stopped_at,
+                    status
+                )
+                VALUES (?, NULL, 'PREPARING')
+            """, (started_at,))
+
+            session_id = cursor.lastrowid
+
+            if session_id is None:
+                raise RuntimeError(
+                    "İzleme oturumu oluşturulamadı."
+                )
+
+            for target in normalized_targets:
+                cursor.execute("""
+                    INSERT INTO session_targets (
+                        session_id,
+                        target_path,
+                        target_type
+                    )
+                    VALUES (?, ?, ?)
+                """, (
+                    session_id,
+                    target["path"],
+                    target["type"],
+                ))
+
+            connection.commit()
+            return session_id
+
+    def set_monitoring_session_status(
+        self,
+        session_id: int,
+        new_status: str,
+    ) -> None:
+        """Oturum durumunu izin verilen geçişlere göre değiştirir."""
+        normalized_status = new_status.upper()
+
+        if normalized_status not in self.SESSION_STATUSES:
+            raise ValueError(
+                f"Geçersiz oturum durumu: {new_status}"
+            )
+
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                SELECT status
+                FROM monitoring_sessions
+                WHERE id = ?
+            """, (session_id,))
+
+            row = cursor.fetchone()
+
+            if row is None:
+                raise LookupError(
+                    f"İzleme oturumu bulunamadı: {session_id}"
+                )
+
+            current_status = row["status"]
+
+            if current_status == normalized_status:
+                return
+
+            allowed_transitions = self.SESSION_TRANSITIONS[
+                current_status
+            ]
+
+            if normalized_status not in allowed_transitions:
+                raise ValueError(
+                    f"Geçersiz durum geçişi: "
+                    f"{current_status} -> {normalized_status}"
+                )
+
+            stopped_at = None
+
+            if normalized_status in {"STOPPED", "ERROR"}:
+                stopped_at = datetime.now().isoformat(
+                    timespec="milliseconds"
+                )
+
+            cursor.execute("""
+                UPDATE monitoring_sessions
+                SET
+                    status = ?,
+                    stopped_at = ?
+                WHERE id = ?
+            """, (
+                normalized_status,
+                stopped_at,
+                session_id,
+            ))
+
+            connection.commit()
+
+    def get_monitoring_session(
+        self,
+        session_id: int,
+    ) -> Dict | None:
+        """Oturumu ve oturumun izleme hedeflerini döndürür."""
+        with self._get_connection() as connection:
+            cursor = connection.cursor()
+
+            cursor.execute("""
+                SELECT *
+                FROM monitoring_sessions
+                WHERE id = ?
+            """, (session_id,))
+
+            session_row = cursor.fetchone()
+
+            if session_row is None:
+                return None
+
+            cursor.execute("""
+                SELECT
+                    target_path,
+                    target_type
+                FROM session_targets
+                WHERE session_id = ?
+                ORDER BY id
+            """, (session_id,))
+
+            session = dict(session_row)
+            session["targets"] = [
+                dict(row)
+                for row in cursor.fetchall()
+            ]
+
+            return session
+
     def add_monitored_path(self, path: str) -> int:
         """İzlenecek bir yolu kaydeder ve kayıt ID'sini döndürür."""
         absolute_path = os.path.abspath(path)
-        created_at = datetime.now().isoformat(timespec="milliseconds")
+        created_at = datetime.now().isoformat(
+            timespec="milliseconds"
+        )
 
         with self._get_connection() as connection:
             cursor = connection.cursor()
@@ -160,7 +350,10 @@ class DatabaseManager:
                     created_at
                 )
                 VALUES (?, ?)
-            """, (absolute_path, created_at))
+            """, (
+                absolute_path,
+                created_at,
+            ))
 
             cursor.execute("""
                 SELECT id
@@ -208,8 +401,11 @@ class DatabaseManager:
 
             connection.commit()
 
-    def get_baseline_for_path(self, path_id: int) -> Dict[str, str]:
-        """Kayıtlı baseline hash değerlerini dosya yoluna göre döndürür."""
+    def get_baseline_for_path(
+        self,
+        path_id: int,
+    ) -> Dict[str, str]:
+        """Kayıtlı baseline hash değerlerini döndürür."""
         with self._get_connection() as connection:
             cursor = connection.cursor()
 
@@ -234,13 +430,10 @@ class DatabaseManager:
         description: str,
         session_id: int | None = None,
     ) -> int:
-        """
-        Güvenlik olayını kaydeder ve oluşturulan olay ID'sini döndürür.
-
-        session_id şimdilik isteğe bağlıdır. Böylece mevcut watcher kodu
-        değişmeden çalışmaya devam eder.
-        """
-        timestamp = datetime.now().isoformat(timespec="milliseconds")
+        """Güvenlik olayını kaydeder ve olay ID'sini döndürür."""
+        timestamp = datetime.now().isoformat(
+            timespec="milliseconds"
+        )
 
         with self._get_connection() as connection:
             cursor = connection.cursor()
@@ -267,17 +460,33 @@ class DatabaseManager:
             connection.commit()
             return cursor.lastrowid
 
-    def get_recent_events(self, limit: int = 20) -> List[Dict]:
-        """En son güvenlik olaylarını yeni kayıttan eskiye doğru döndürür."""
+    def get_recent_events(
+        self,
+        limit: int = 20,
+        session_id: int | None = None,
+    ) -> List[Dict]:
+        """En son güvenlik olaylarını döndürür."""
         with self._get_connection() as connection:
             cursor = connection.cursor()
 
-            cursor.execute("""
-                SELECT *
-                FROM security_events
-                ORDER BY id DESC
-                LIMIT ?
-            """, (limit,))
+            if session_id is None:
+                cursor.execute("""
+                    SELECT *
+                    FROM security_events
+                    ORDER BY id DESC
+                    LIMIT ?
+                """, (limit,))
+            else:
+                cursor.execute("""
+                    SELECT *
+                    FROM security_events
+                    WHERE session_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                """, (
+                    session_id,
+                    limit,
+                ))
 
             return [
                 dict(row)
