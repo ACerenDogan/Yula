@@ -24,9 +24,12 @@ class YulaFileEventHandler(FileSystemEventHandler):
         db: DatabaseManager,
         targets: Iterable[str] | None = None,
         event_callback: Callable[[dict], None] | None = None,
+        session_id: int | None = None,
     ):
         super().__init__()
         self.db = db
+        self.session_id = session_id
+
         self.targets = (
             tuple(normalize_path(target) for target in targets)
             if targets is not None
@@ -65,6 +68,7 @@ class YulaFileEventHandler(FileSystemEventHandler):
             risk,
             normalized,
             description,
+            session_id=self.session_id,
         )
         if self.event_callback is not None:
             self.event_callback(
@@ -74,6 +78,7 @@ class YulaFileEventHandler(FileSystemEventHandler):
                     "risk_level": risk,
                     "target_path": normalized,
                     "description": description,
+                    "session_id": self.session_id,
                 }
             )
 
@@ -208,6 +213,7 @@ class YulaWatcher:
         baseline_data: dict,
         db: DatabaseManager,
         event_callback: Callable[[dict], None] | None = None,
+        session_id: int | None = None,
     ):
         self.targets = tuple(normalize_path(target) for target in targets)
         if not self.targets:
@@ -217,6 +223,7 @@ class YulaWatcher:
             db,
             targets=self.targets,
             event_callback=event_callback,
+            session_id=session_id,
         )
         self.observer = Observer()
         self._started = False

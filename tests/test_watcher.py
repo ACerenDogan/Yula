@@ -17,13 +17,14 @@ class FakeDatabase:
     def __init__(self):
         self.events = []
 
-    def log_security_event(self, event_type, risk_level, target_path, description):
+    def log_security_event(self, event_type, risk_level, target_path, description,session_id=None):
         self.events.append(
             {
                 "event_type": event_type,
                 "risk_level": risk_level,
                 "target_path": target_path,
                 "description": description,
+                "session_id": session_id,
             }
         )
         return len(self.events)
@@ -108,6 +109,39 @@ class TestYulaFileEventHandler(unittest.TestCase):
             self.assertEqual(len(db.events), 1)
             self.assertEqual(db.events[0]["event_type"], "MODIFIED")
             self.assertEqual(db.events[0]["risk_level"], "HIGH")
+
+    def test_olayi_izleme_oturumuna_baglar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "app.py")
+
+            with open(path, "w", encoding="utf-8") as file:
+                file.write("trusted")
+
+            baseline_hash = calculate_sha256(path)
+            database = FakeDatabase()
+
+            handler = YulaFileEventHandler(
+                baseline_data={path: baseline_hash},
+                db=database,
+                targets=[path],
+                session_id=42,
+            )
+
+            with open(path, "w", encoding="utf-8") as file:
+                file.write("changed")
+
+            handler.on_modified(
+                FileModifiedEvent(path)
+            )
+
+            self.assertEqual(
+                len(database.events),
+                1,
+            )
+            self.assertEqual(
+                database.events[0]["session_id"],
+                42,
+            )
 
 
 if __name__ == "__main__":
