@@ -47,7 +47,7 @@ class RiskEngine:
                 return "LOW", f"Dosya silindi: {filename}"
 
         elif event_type == "RESTORED":
-            return "LOW", f"Dosya güvenilir baseline içeriğine geri döndü: {filename}"
+            return "LOW", f"Dosya güvenilir referans içeriğine geri döndü: {filename}"
 
         elif event_type == "MOVED":
             if is_critical:

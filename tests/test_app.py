@@ -12,7 +12,10 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 
-from yula.gui.app import YulaMainWindow
+from yula.gui.app import (
+    YulaMainWindow,
+    configure_application_font,
+)
 from yula.storage.database import DatabaseManager
 
 
@@ -47,6 +50,7 @@ class TestYulaMainWindow(unittest.TestCase):
             QApplication.instance()
             or QApplication([])
         )
+        configure_application_font(cls.application)
 
     def test_olay_tablosu_salt_okunurdur(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -127,6 +131,14 @@ class TestYulaMainWindow(unittest.TestCase):
             self.assertEqual(
                 window.table.item(0, 4).text(),
                 "Birinci çalışma",
+            )
+            self.assertEqual(
+                window.table.item(0, 1).text(),
+                "Yüksek",
+            )
+            self.assertEqual(
+                window.table.item(0, 2).text(),
+                "Değiştirildi",
             )
 
             window.close()

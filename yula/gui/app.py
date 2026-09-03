@@ -10,7 +10,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -30,10 +30,35 @@ from PySide6.QtWidgets import (
 from yula.application.monitoring_service import (
     MonitoringService,
 )
+from yula.gui.labels import (
+    event_type_label,
+    risk_label,
+)
 from yula.gui.target_selection import (
     TargetSelectionDialog,
 )
 from yula.storage.database import DatabaseManager
+
+
+def configure_application_font(
+    application: QApplication,
+) -> None:
+    """Uygulama için sistemde bulunan okunaklı bir arayüz yazı tipi seçer."""
+    available_families = set(QFontDatabase.families())
+    current_font = application.font()
+
+    if current_font.family() in available_families:
+        return
+
+    for family in (
+        "Helvetica Neue",
+        "Arial",
+        "DejaVu Sans",
+    ):
+        if family in available_families:
+            current_font.setFamily(family)
+            application.setFont(current_font)
+            return
 
 
 class EventBridge(QObject):
@@ -43,7 +68,7 @@ class EventBridge(QObject):
 
 
 class MonitoringStartWorker(QObject):
-    """Baseline taramasını GUI'yi dondurmadan çalıştırır."""
+    """Referans durum taramasını arayüzü dondurmadan çalıştırır."""
 
     succeeded = Signal(int)
     failed = Signal(str)
@@ -107,7 +132,7 @@ class YulaMainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle(
-            "YULA — Dosya Bütünlüğü İzleme Konsolu"
+            "YULA — Dosya Bütünlüğü Denetim Paneli"
         )
         self.resize(1180, 720)
         self.setMinimumSize(920, 600)
@@ -177,7 +202,7 @@ class YulaMainWindow(QMainWindow):
         title.setObjectName("applicationTitle")
 
         subtitle = QLabel(
-            "Yerel dosya bütünlüğü izleme konsolu"
+            "Yerel dosya ve klasör değişikliklerini güvenilir referansa göre izler"
         )
         subtitle.setObjectName("applicationSubtitle")
 
@@ -491,7 +516,7 @@ class YulaMainWindow(QMainWindow):
 
         self._set_status(
             "PREPARING",
-            "BASELINE HAZIRLANIYOR",
+            "REFERANS DURUM HAZIRLANIYOR",
         )
 
         self.select_targets_button.setEnabled(False)
@@ -670,7 +695,7 @@ class YulaMainWindow(QMainWindow):
             time_item = QTableWidgetItem(timestamp)
 
             risk_item = QTableWidgetItem(
-                event["risk_level"]
+                risk_label(event["risk_level"])
             )
             risk_item.setTextAlignment(
                 Qt.AlignmentFlag.AlignCenter
@@ -683,16 +708,12 @@ class YulaMainWindow(QMainWindow):
                     )
                 )
             )
-            risk_item.setFont(
-                QFont(
-                    self.font().family(),
-                    10,
-                    QFont.Weight.DemiBold,
-                )
-            )
+            risk_font = risk_item.font()
+            risk_font.setWeight(QFont.Weight.DemiBold)
+            risk_item.setFont(risk_font)
 
             event_item = QTableWidgetItem(
-                event["event_type"]
+                event_type_label(event["event_type"])
             )
 
             target_item = QTableWidgetItem(
@@ -742,7 +763,7 @@ class YulaMainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Tarama Devam Ediyor",
-                "Baseline taraması tamamlanmadan "
+                "Referans durum taraması tamamlanmadan "
                 "uygulama kapatılamaz.",
             )
             event.ignore()
@@ -760,6 +781,7 @@ class YulaMainWindow(QMainWindow):
 def start_gui() -> None:
     application = QApplication(sys.argv)
     application.setStyle("Fusion")
+    configure_application_font(application)
 
     window = YulaMainWindow()
     window.show()

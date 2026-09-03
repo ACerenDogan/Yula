@@ -8,10 +8,10 @@ class TestRiskEngine(unittest.TestCase):
         risk, _ = RiskEngine.evaluate_file_event("CREATED", "/project/.env")
         self.assertEqual(risk, "HIGH")
 
-    def test_baseline_durumuna_donus_ayri_olaydir(self):
+    def test_referans_duruma_donus_ayri_olaydir(self):
         risk, description = RiskEngine.evaluate_file_event("RESTORED", "/project/app.py")
         self.assertEqual(risk, "LOW")
-        self.assertIn("baseline", description)
+        self.assertIn("referans", description)
 
 
 if __name__ == "__main__":
