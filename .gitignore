@@ -1,0 +1,10 @@
+.venv/
+.venv-1/
+__pycache__/
+*.py[cod]
+.DS_Store
+yula.db
+yula.db-shm
+yula.db-wal
+
+
