@@ -1,4 +1,5 @@
 import os
+import stat
 import tempfile
 import unittest
 
@@ -346,6 +347,97 @@ class TestDatabaseManager(unittest.TestCase):
             self.assertEqual(
                 first_groups[0]["description"],
                 "Birinci çalışma",
+            )
+    @unittest.skipIf(
+        os.name == "nt",
+        "Unix dosya izinleri Windows üzerinde uygulanmaz.",
+    )
+    def test_veritabani_dosyasini_sadece_sahibine_acar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = os.path.join(
+                directory,
+                "test.db",
+            )
+
+            DatabaseManager(database_path)
+
+            file_mode = stat.S_IMODE(
+                os.stat(database_path).st_mode
+            )
+
+            self.assertEqual(
+                file_mode,
+                0o600,
+            )
+
+    def test_sembolik_baglanti_uzerinden_veritabani_acmaz(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real_database_path = os.path.join(
+                directory,
+                "real.db",
+            )
+            linked_database_path = os.path.join(
+                directory,
+                "linked.db",
+            )
+
+            DatabaseManager(real_database_path)
+
+            os.symlink(
+                real_database_path,
+                linked_database_path,
+            )
+
+            with self.assertRaises(ValueError):
+                DatabaseManager(
+                    linked_database_path
+                )
+
+    def test_gecersiz_guvenlik_olaylarini_reddeder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(
+                os.path.join(directory, "test.db")
+            )
+
+            invalid_events = [
+                {
+                    "event_type": "UNKNOWN",
+                    "risk_level": "HIGH",
+                    "target_path": "/project/app.py",
+                    "description": "Geçersiz olay türü",
+                },
+                {
+                    "event_type": "MODIFIED",
+                    "risk_level": "CRITICAL",
+                    "target_path": "/project/app.py",
+                    "description": "Geçersiz risk seviyesi",
+                },
+                {
+                    "event_type": "MODIFIED",
+                    "risk_level": "HIGH",
+                    "target_path": "   ",
+                    "description": "Boş hedef",
+                },
+                {
+                    "event_type": "MODIFIED",
+                    "risk_level": "HIGH",
+                    "target_path": "/project/app.py",
+                    "description": "   ",
+                },
+            ]
+
+            for invalid_event in invalid_events:
+                with self.subTest(
+                    invalid_event=invalid_event
+                ):
+                    with self.assertRaises(ValueError):
+                        database.log_security_event(
+                            **invalid_event
+                        )
+
+            self.assertEqual(
+                database.get_recent_events(),
+                [],
             )
 
 

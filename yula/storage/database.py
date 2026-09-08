@@ -27,10 +27,77 @@ class DatabaseManager:
         "FILE",
         "DIRECTORY",
     }
+    EVENT_TYPES = {
+        "MODIFIED",
+        "CREATED",
+        "DELETED",
+        "RESTORED",
+        "MOVED",
+    }
+
+    RISK_LEVELS = {
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+    }
 
     def __init__(self, db_path: str = "yula.db"):
-        self.db_path = os.path.abspath(db_path)
+        self.db_path = os.path.abspath(
+            os.path.expanduser(db_path)
+        )
+        self._prepare_database_file()
         self._init_db()
+
+    def _prepare_database_file(self) -> None:
+        """
+        Veritabanını güvenli bir normal dosya olarak hazırlar.
+
+        Unix sistemlerinde yalnızca dosyanın sahibine
+        okuma ve yazma yetkisi verir.
+        """
+        parent_directory = os.path.dirname(
+            self.db_path
+        )
+
+        os.makedirs(
+            parent_directory,
+            mode=0o700,
+            exist_ok=True,
+        )
+
+        if os.path.lexists(self.db_path):
+            if os.path.islink(self.db_path):
+                raise ValueError(
+                    "Veritabanı yolu sembolik bağlantı olamaz."
+                )
+
+            if not os.path.isfile(self.db_path):
+                raise ValueError(
+                    "Veritabanı yolu normal bir dosya olmalıdır."
+                )
+
+        else:
+            open_flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+            )
+
+            if hasattr(os, "O_NOFOLLOW"):
+                open_flags |= os.O_NOFOLLOW
+
+            file_descriptor = os.open(
+                self.db_path,
+                open_flags,
+                0o600,
+            )
+            os.close(file_descriptor)
+
+        if os.name != "nt":
+            os.chmod(
+                self.db_path,
+                0o600,
+            )
 
     @contextmanager
     def _get_connection(
@@ -449,7 +516,73 @@ class DatabaseManager:
         description: str,
         session_id: int | None = None,
     ) -> int:
-        """Güvenlik olayını kaydeder ve olay ID'sini döndürür."""
+        """Doğrulanmış güvenlik olayını veritabanına kaydeder."""
+        if not isinstance(event_type, str):
+            raise ValueError(
+                "Olay türü metin olmalıdır."
+            )
+
+        normalized_event_type = (
+            event_type.strip().upper()
+        )
+
+        if normalized_event_type not in self.EVENT_TYPES:
+            raise ValueError(
+                f"Geçersiz olay türü: {event_type}"
+            )
+
+        if not isinstance(risk_level, str):
+            raise ValueError(
+                "Risk seviyesi metin olmalıdır."
+            )
+
+        normalized_risk_level = (
+            risk_level.strip().upper()
+        )
+
+        if normalized_risk_level not in self.RISK_LEVELS:
+            raise ValueError(
+                f"Geçersiz risk seviyesi: {risk_level}"
+            )
+
+        if (
+            not isinstance(target_path, str)
+            or not target_path.strip()
+        ):
+            raise ValueError(
+                "Güvenlik olayının geçerli bir hedef yolu "
+                "olmalıdır."
+            )
+
+        normalized_target_path = os.path.abspath(
+            os.path.expanduser(
+                target_path.strip()
+            )
+        )
+
+        if (
+            not isinstance(description, str)
+            or not description.strip()
+        ):
+            raise ValueError(
+                "Güvenlik olayının açıklaması boş olamaz."
+            )
+
+        normalized_description = description.strip()
+
+        if (
+            session_id is not None
+            and (
+                isinstance(session_id, bool)
+                or not isinstance(session_id, int)
+                or session_id < 1
+            )
+        ):
+            raise ValueError(
+                "İzleme çalışması kimliği pozitif "
+                "bir tam sayı olmalıdır."
+            )
+
         timestamp = datetime.now().isoformat(
             timespec="milliseconds"
         )
@@ -469,15 +602,21 @@ class DatabaseManager:
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 timestamp,
-                event_type,
-                risk_level,
-                target_path,
-                description,
+                normalized_event_type,
+                normalized_risk_level,
+                normalized_target_path,
+                normalized_description,
                 session_id,
             ))
 
-            connection.commit()
-            return cursor.lastrowid
+            event_id = cursor.lastrowid
+
+            if event_id is None:
+                raise RuntimeError(
+                    "Güvenlik olayı kaydedilemedi."
+                )
+
+            return event_id
 
     def get_recent_events(
         self,
