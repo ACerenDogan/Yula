@@ -16,6 +16,7 @@ IGNORED_DIRECTORY_NAMES = {
 IGNORED_FILE_NAMES = {
     ".DS_Store",
     "yula.db",
+    "yula.db-journal",
     "yula.db-shm",
     "yula.db-wal",
 }

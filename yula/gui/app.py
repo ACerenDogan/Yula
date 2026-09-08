@@ -14,15 +14,19 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
+    QStackedWidget,
+    QStyle,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -250,7 +254,10 @@ class YulaMainWindow(QMainWindow):
         control_layout.addStretch()
 
         self.select_targets_button = QPushButton(
-            "Hedefleri Seç"
+            "Dosya veya Klasör Seç"
+        )
+        self.select_targets_button.setObjectName(
+            "primaryButton"
         )
         self.select_targets_button.clicked.connect(
             self._open_target_selection
@@ -274,15 +281,33 @@ class YulaMainWindow(QMainWindow):
 
         event_header_layout = QHBoxLayout()
 
-        event_title = QLabel("Güvenlik olayları")
+        event_title_layout = QVBoxLayout()
+        event_title_layout.setSpacing(2)
+
+        event_title = QLabel("Dosya değişiklikleri")
         event_title.setObjectName("sectionTitle")
+
+        event_description = QLabel(
+            "Bir dosya satırını açarak o dosyanın "
+            "değişiklik geçmişini inceleyin."
+        )
+        event_description.setObjectName(
+            "sectionDescription"
+        )
+
+        event_title_layout.addWidget(event_title)
+        event_title_layout.addWidget(
+            event_description
+        )
 
         self.session_label = QLabel(
             "Aktif çalışma yok"
         )
         self.session_label.setObjectName("sessionLabel")
 
-        event_header_layout.addWidget(event_title)
+        event_header_layout.addLayout(
+            event_title_layout
+        )
         event_header_layout.addStretch()
         event_header_layout.addWidget(
             self.session_label
@@ -290,14 +315,48 @@ class YulaMainWindow(QMainWindow):
 
         main_layout.addLayout(event_header_layout)
 
-        self.table = QTableWidget()
+        filter_frame = QFrame()
+        filter_frame.setObjectName("filterFrame")
+
+        filter_layout = QHBoxLayout(filter_frame)
+        filter_layout.setContentsMargins(12, 10, 12, 10)
+        filter_layout.setSpacing(10)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText(
+            "Dosya adı, yol veya açıklama ara"
+        )
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(
+            self._refresh_events
+        )
+
+        self.risk_filter = QComboBox()
+        self.risk_filter.addItem(
+            "Tüm risk düzeyleri",
+            None,
+        )
+        self.risk_filter.addItem("Yüksek", "HIGH")
+        self.risk_filter.addItem("Orta", "MEDIUM")
+        self.risk_filter.addItem("Düşük", "LOW")
+        self.risk_filter.currentIndexChanged.connect(
+            self._refresh_events
+        )
+
+        filter_layout.addWidget(self.search_input, 1)
+        filter_layout.addWidget(self.risk_filter)
+
+        main_layout.addWidget(filter_frame)
+
+        self.table = QTreeWidget()
+        self.table.setObjectName("eventTree")
         self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels([
-            "Zaman",
-            "Risk",
-            "Olay",
-            "Hedef",
-            "Açıklama",
+        self.table.setHeaderLabels([
+            "Son olay",
+            "En yüksek risk",
+            "Son işlem",
+            "Dosya / hedef",
+            "Özet",
         ])
 
         self.table.setEditTriggers(
@@ -310,11 +369,14 @@ class YulaMainWindow(QMainWindow):
             QAbstractItemView.SelectionMode.SingleSelection
         )
         self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.setRootIsDecorated(True)
+        self.table.setItemsExpandable(True)
+        self.table.setAnimated(True)
+        self.table.setIndentation(22)
+        self.table.setExpandsOnDoubleClick(True)
 
-        header = self.table.horizontalHeader()
+        header = self.table.header()
+
         header.setSectionResizeMode(
             0,
             QHeaderView.ResizeMode.ResizeToContents,
@@ -336,7 +398,45 @@ class YulaMainWindow(QMainWindow):
             QHeaderView.ResizeMode.Stretch,
         )
 
-        main_layout.addWidget(self.table)
+        self.empty_state = QFrame()
+        self.empty_state.setObjectName("emptyState")
+
+        empty_layout = QVBoxLayout(self.empty_state)
+        empty_layout.setContentsMargins(32, 48, 32, 48)
+        empty_layout.setSpacing(8)
+        empty_layout.addStretch()
+
+        self.empty_title = QLabel(
+            "İzleme henüz başlamadı"
+        )
+        self.empty_title.setObjectName("emptyTitle")
+        self.empty_title.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        self.empty_description = QLabel(
+            "Başlamak için yukarıdan bir dosya veya "
+            "klasör seçin."
+        )
+        self.empty_description.setObjectName(
+            "emptyDescription"
+        )
+        self.empty_description.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+        self.empty_description.setWordWrap(True)
+
+        empty_layout.addWidget(self.empty_title)
+        empty_layout.addWidget(
+            self.empty_description
+        )
+        empty_layout.addStretch()
+
+        self.event_stack = QStackedWidget()
+        self.event_stack.addWidget(self.empty_state)
+        self.event_stack.addWidget(self.table)
+
+        main_layout.addWidget(self.event_stack, 1)
 
         footer_layout = QHBoxLayout()
 
@@ -397,6 +497,11 @@ class YulaMainWindow(QMainWindow):
                 font-weight: 700;
             }
 
+            QLabel#sectionDescription {
+                color: #64748b;
+                font-size: 12px;
+            }
+
             QLabel#sessionLabel,
             QLabel#footerLabel {
                 color: #64748b;
@@ -427,14 +532,79 @@ class YulaMainWindow(QMainWindow):
                 border-color: #fecaca;
             }
 
-            QTableWidget {
+            QPushButton#primaryButton {
+                color: #ffffff;
+                background-color: #1d4ed8;
+                border-color: #1d4ed8;
+                font-weight: 650;
+            }
+
+            QPushButton#primaryButton:hover {
+                background-color: #1e40af;
+                border-color: #1e40af;
+            }
+
+            QPushButton#primaryButton:disabled {
+                color: #dbeafe;
+                background-color: #93c5fd;
+                border-color: #93c5fd;
+            }
+
+            QFrame#filterFrame {
                 background-color: #ffffff;
-                alternate-background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 7px;
+            }
+
+            QLineEdit,
+            QComboBox {
+                min-height: 32px;
+                color: #0f172a;
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                padding: 0 10px;
+            }
+
+            QLineEdit:focus,
+            QComboBox:focus {
+                border-color: #2563eb;
+            }
+
+            QTreeWidget#eventTree {
+                background-color: #ffffff;
                 color: #0f172a;
                 border: 1px solid #e2e8f0;
                 border-radius: 7px;
                 selection-background-color: #dbeafe;
                 selection-color: #172554;
+                outline: none;
+            }
+
+            QTreeWidget#eventTree::item {
+                min-height: 36px;
+                border-bottom: 1px solid #f1f5f9;
+            }
+
+            QTreeWidget#eventTree::item:hover {
+                background-color: #eff6ff;
+            }
+
+            QFrame#emptyState {
+                background-color: #ffffff;
+                border: 1px dashed #cbd5e1;
+                border-radius: 8px;
+            }
+
+            QLabel#emptyTitle {
+                color: #0f172a;
+                font-size: 17px;
+                font-weight: 700;
+            }
+
+            QLabel#emptyDescription {
+                color: #64748b;
+                font-size: 13px;
             }
 
             QHeaderView::section {
@@ -664,96 +834,279 @@ class YulaMainWindow(QMainWindow):
             self.stop_button.setEnabled(False)
 
     def _refresh_events(self) -> None:
+        expanded_targets = set()
+
+        for index in range(
+            self.table.topLevelItemCount()
+        ):
+            item = self.table.topLevelItem(index)
+
+            if item.isExpanded():
+                expanded_targets.add(
+                    item.data(
+                        3,
+                        Qt.ItemDataRole.UserRole,
+                    )
+                )
+
         if self.current_session_id is None:
-            events = []
+            all_groups = []
         else:
-            events = self.database.get_recent_events(
-                limit=500,
+            all_groups = self.database.get_event_groups(
                 session_id=self.current_session_id,
+                limit=100,
             )
 
-        self.table.setRowCount(len(events))
+        search_term = (
+            self.search_input.text().strip().casefold()
+        )
+        selected_risk = self.risk_filter.currentData()
+
+        groups = []
+
+        for group in all_groups:
+            searchable_text = " ".join((
+                group["target_path"] or "",
+                group["description"] or "",
+                event_type_label(group["event_type"]),
+            )).casefold()
+
+            if (
+                search_term
+                and search_term not in searchable_text
+            ):
+                continue
+
+            if (
+                selected_risk is not None
+                and group["highest_risk"]
+                != selected_risk
+            ):
+                continue
+
+            groups.append(group)
+
+        self.table.clear()
+
+        if groups:
+            self.event_stack.setCurrentWidget(
+                self.table
+            )
+        else:
+            self.event_stack.setCurrentWidget(
+                self.empty_state
+            )
+
+            if self.current_session_id is None:
+                self.empty_title.setText(
+                    "İzleme henüz başlamadı"
+                )
+                self.empty_description.setText(
+                    "Başlamak için yukarıdan bir dosya "
+                    "veya klasör seçin."
+                )
+            elif all_groups:
+                self.empty_title.setText(
+                    "Eşleşen olay bulunamadı"
+                )
+                self.empty_description.setText(
+                    "Arama metnini veya risk filtresini "
+                    "değiştirerek yeniden deneyin."
+                )
+            else:
+                self.empty_title.setText(
+                    "Henüz güvenlik olayı yok"
+                )
+                self.empty_description.setText(
+                    "İzleme aktif. Seçtiğiniz hedeflerdeki "
+                    "değişiklikler burada görünecek."
+                )
 
         risk_colors = {
             "HIGH": "#dc2626",
             "MEDIUM": "#d97706",
             "LOW": "#15803d",
         }
+        risk_backgrounds = {
+            "HIGH": "#fef2f2",
+            "MEDIUM": "#fffbeb",
+            "LOW": "#f0fdf4",
+        }
 
-        for row_index, event in enumerate(events):
-            timestamp = event["timestamp"].replace(
-                "T",
-                " ",
-            )
+        total_event_count = 0
 
-            target_path = event["target_path"] or ""
+        for group in groups:
+            target_path = group["target_path"] or ""
             target_name = (
                 os.path.basename(target_path)
                 or target_path
             )
 
-            time_item = QTableWidgetItem(timestamp)
+            event_count = group["event_count"]
+            total_event_count += event_count
 
-            risk_item = QTableWidgetItem(
-                risk_label(event["risk_level"])
+            last_seen = group["last_seen"].replace(
+                "T",
+                " ",
             )
-            risk_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignCenter
+
+            group_item = QTreeWidgetItem(
+                self.table
             )
-            risk_item.setForeground(
+
+            group_item.setText(0, last_seen)
+            group_item.setText(
+                1,
+                risk_label(group["highest_risk"]),
+            )
+            group_item.setText(
+                2,
+                event_type_label(group["event_type"]),
+            )
+            group_item.setText(3, target_name)
+            group_item.setIcon(
+                3,
+                self.style().standardIcon(
+                    QStyle.StandardPixmap.SP_FileIcon
+                ),
+            )
+            group_item.setText(
+                4,
+                f"{event_count} olay · "
+                f"{group['description']}",
+            )
+
+            group_item.setData(
+                3,
+                Qt.ItemDataRole.UserRole,
+                target_path,
+            )
+            group_item.setToolTip(
+                3,
+                target_path,
+            )
+            group_item.setToolTip(
+                4,
+                "Dosyanın olay geçmişini görmek için "
+                "satırı açın.",
+            )
+            group_item.setTextAlignment(
+                1,
+                Qt.AlignmentFlag.AlignCenter,
+            )
+            group_item.setForeground(
+                1,
                 QColor(
                     risk_colors.get(
-                        event["risk_level"],
+                        group["highest_risk"],
                         "#475569",
                     )
+                ),
+            )
+            group_item.setBackground(
+                1,
+                QColor(
+                    risk_backgrounds.get(
+                        group["highest_risk"],
+                        "#ffffff",
+                    )
+                ),
+            )
+
+            for column in range(
+                self.table.columnCount()
+            ):
+                group_font = group_item.font(
+                    column
+                )
+                group_font.setWeight(
+                    QFont.Weight.DemiBold
+                )
+                group_item.setFont(
+                    column,
+                    group_font,
+                )
+
+                if column != 1:
+                    group_item.setBackground(
+                        column,
+                        QColor("#f8fafc"),
+                    )
+
+            events = (
+                self.database.get_events_for_target(
+                    session_id=self.current_session_id,
+                    target_path=target_path,
+                    limit=200,
                 )
             )
-            risk_font = risk_item.font()
-            risk_font.setWeight(QFont.Weight.DemiBold)
-            risk_item.setFont(risk_font)
 
-            event_item = QTableWidgetItem(
-                event_type_label(event["event_type"])
+            for event in events:
+                timestamp = event["timestamp"].replace(
+                    "T",
+                    " ",
+                )
+
+                event_item = QTreeWidgetItem(
+                    group_item
+                )
+
+                event_item.setText(0, timestamp)
+                event_item.setText(
+                    1,
+                    risk_label(event["risk_level"]),
+                )
+                event_item.setText(
+                    2,
+                    event_type_label(
+                        event["event_type"]
+                    ),
+                )
+                event_item.setText(3, "")
+                event_item.setText(
+                    4,
+                    event["description"],
+                )
+
+                event_item.setTextAlignment(
+                    1,
+                    Qt.AlignmentFlag.AlignCenter,
+                )
+                event_item.setForeground(
+                    1,
+                    QColor(
+                        risk_colors.get(
+                            event["risk_level"],
+                            "#475569",
+                        )
+                    ),
+                )
+                event_item.setBackground(
+                    1,
+                    QColor(
+                        risk_backgrounds.get(
+                            event["risk_level"],
+                            "#ffffff",
+                        )
+                    ),
+                )
+
+            group_item.setExpanded(
+                target_path in expanded_targets
             )
 
-            target_item = QTableWidgetItem(
-                target_name
+        if len(groups) != len(all_groups):
+            count_text = (
+                f"{total_event_count} olay, "
+                f"{len(groups)} hedef eşleşiyor"
             )
-            target_item.setToolTip(target_path)
-
-            description_item = QTableWidgetItem(
-                event["description"]
-            )
-
-            self.table.setItem(
-                row_index,
-                0,
-                time_item,
-            )
-            self.table.setItem(
-                row_index,
-                1,
-                risk_item,
-            )
-            self.table.setItem(
-                row_index,
-                2,
-                event_item,
-            )
-            self.table.setItem(
-                row_index,
-                3,
-                target_item,
-            )
-            self.table.setItem(
-                row_index,
-                4,
-                description_item,
+        else:
+            count_text = (
+                f"{total_event_count} olay, "
+                f"{len(groups)} hedef görüntüleniyor"
             )
 
-        self.event_count_label.setText(
-            f"{len(events)} olay görüntüleniyor"
-        )
+        self.event_count_label.setText(count_text)
 
     def closeEvent(self, event) -> None:
         if (

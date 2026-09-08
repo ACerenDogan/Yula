@@ -72,6 +72,14 @@ class TestYulaMainWindow(unittest.TestCase):
                 window.status_badge.text(),
                 "SEÇİM BEKLENİYOR",
             )
+            self.assertIs(
+                window.event_stack.currentWidget(),
+                window.empty_state,
+            )
+            self.assertEqual(
+                window.empty_title.text(),
+                "İzleme henüz başlamadı",
+            )
 
             window.close()
 
@@ -125,23 +133,121 @@ class TestYulaMainWindow(unittest.TestCase):
             window._refresh_events()
 
             self.assertEqual(
-                window.table.rowCount(),
+                window.table.topLevelItemCount(),
                 1,
             )
-            self.assertEqual(
-                window.table.item(0, 4).text(),
+
+            group_item = window.table.topLevelItem(0)
+
+            self.assertIn(
                 "Birinci çalışma",
+                group_item.text(4),
             )
             self.assertEqual(
-                window.table.item(0, 1).text(),
+                group_item.text(1),
                 "Yüksek",
             )
             self.assertEqual(
-                window.table.item(0, 2).text(),
+                group_item.text(2),
                 "Değiştirildi",
             )
 
+            low_risk_index = (
+                window.risk_filter.findData("LOW")
+            )
+            window.risk_filter.setCurrentIndex(
+                low_risk_index
+            )
+
+            self.assertEqual(
+                window.table.topLevelItemCount(),
+                0,
+            )
+            self.assertEqual(
+                window.empty_title.text(),
+                "Eşleşen olay bulunamadı",
+            )
+
+            high_risk_index = (
+                window.risk_filter.findData("HIGH")
+            )
+            window.risk_filter.setCurrentIndex(
+                high_risk_index
+            )
+
+            self.assertEqual(
+                window.table.topLevelItemCount(),
+                1,
+            )
+
+            window.search_input.setText("second.py")
+
+            self.assertEqual(
+                window.table.topLevelItemCount(),
+                0,
+            )
+
             window.close()
+
+    def test_ayni_hedefin_olaylarini_tek_baslik_altinda_gosterir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(
+                os.path.join(directory, "test.db")
+            )
+
+            target_path = "/project/app.py"
+
+            session_id = database.create_monitoring_session([
+                {
+                    "path": target_path,
+                    "type": "FILE",
+                },
+            ])
+
+            database.log_security_event(
+                event_type="MODIFIED",
+                risk_level="HIGH",
+                target_path=target_path,
+                description="İlk değişiklik",
+                session_id=session_id,
+            )
+
+            database.log_security_event(
+                event_type="RESTORED",
+                risk_level="LOW",
+                target_path=target_path,
+                description="Referans duruma döndü",
+                session_id=session_id,
+            )
+
+            window = YulaMainWindow(
+                database=database,
+                service_factory=FakeMonitoringService,
+                show_startup_dialog=False,
+            )
+
+            try:
+                window.current_session_id = session_id
+                window._refresh_events()
+
+                self.assertEqual(
+                    window.table.topLevelItemCount(),
+                    1,
+                )
+
+                group_item = window.table.topLevelItem(0)
+
+                self.assertEqual(
+                    group_item.text(3),
+                    "app.py",
+                )
+                self.assertEqual(
+                    group_item.childCount(),
+                    2,
+                )
+
+            finally:
+                window.close()
 
 
 if __name__ == "__main__":
