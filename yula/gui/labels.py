@@ -10,6 +10,12 @@ EVENT_TYPE_LABELS = {
     "DELETED": "Silindi",
     "RESTORED": "Referans duruma döndü",
     "MOVED": "Taşındı / yeniden adlandırıldı",
+    "PERMISSIONS_CHANGED": "İzinleri değişti",
+    "OWNERSHIP_CHANGED": "Sahibi / grubu değişti",
+    "SYMLINK_CHANGED": "Sembolik bağlantı değişti",
+    "POSSIBLE_COPY": "Dosya kopyası oluşturuldu",
+    "CLIPBOARD_COPY": "Dosya kopyalandı",
+    "CONTENT_CLIPBOARD_COPY": "İçerik kopyalandı",
 }
 
 SESSION_STATUS_LABELS = {

@@ -4,7 +4,7 @@ import os
 def calculate_sha256(filepath: str, chunk_size: int = 65536) -> str:
     """
     Belirtilen dosyanın SHA-256 özetini belleği şişirmeden
-    parça parça (varsayılan 64 KB) okuyarak hesaplar.
+    parça parça (varsayılan olan 64 KB için) okuyarak hesaplar.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Dosya bulunamadı: {filepath}")

@@ -2,76 +2,152 @@ import os
 from collections.abc import Iterable
 from typing import Dict
 
-from yula.core.hasher import calculate_sha256
-from yula.core.paths import normalize_path, should_ignore_path
+from yula.core.file_snapshot import (
+    capture_file_snapshot,
+)
+from yula.core.paths import (
+    normalize_path,
+    should_ignore_path,
+)
 
 
 def scan_file(file_path: str) -> dict:
-    """Create a baseline record for one regular file."""
-    normalized = normalize_path(file_path)
-    if not os.path.exists(normalized):
-        raise FileNotFoundError(f"Taranacak dosya bulunamadı: {normalized}")
-    if not os.path.isfile(normalized):
-        raise IsADirectoryError(f"Verilen yol bir dosya değil: {normalized}")
-
-    stat_info = os.stat(normalized)
-    return {
-        "hash": calculate_sha256(normalized),
-        "size": stat_info.st_size,
-        "last_modified": stat_info.st_mtime,
-    }
+    """Bir dosya veya symlink için güvenlik fotoğrafı oluşturur."""
+    return capture_file_snapshot(file_path)
 
 
-def scan_directory(directory_path: str) -> Dict[str, dict]:
+def scan_directory(
+    directory_path: str,
+) -> Dict[str, dict]:
     """
-    Belirtilen klasördeki tüm dosyaları tarar ve her birinin
-    boyutunu, son değiştirilme zamanını ve SHA-256 parmak izini çıkarır.
-    """
-    if not os.path.exists(directory_path):
-        raise FileNotFoundError(f"Taranacak dizin bulunamadı: {directory_path}")
+    Klasördeki dosyaları ve symlink'leri güvenli şekilde tarar.
 
-    if not os.path.isdir(directory_path):
-        raise NotADirectoryError(f"Verilen yol bir klasör değil: {directory_path}")
+    Symlink olan dizinlerin hedeflerine girmez.
+    """
+    normalized_directory = normalize_path(
+        directory_path
+    )
+
+    if not os.path.exists(normalized_directory):
+        raise FileNotFoundError(
+            f"Taranacak dizin bulunamadı: "
+            f"{normalized_directory}"
+        )
+
+    if os.path.islink(normalized_directory):
+        raise ValueError(
+            "Symlink bir yol doğrudan klasör olarak "
+            "taranamaz."
+        )
+
+    if not os.path.isdir(normalized_directory):
+        raise NotADirectoryError(
+            f"Verilen yol bir klasör değil: "
+            f"{normalized_directory}"
+        )
 
     baseline_data: Dict[str, dict] = {}
-    normalized_directory = normalize_path(directory_path)
 
-    # os.walk klasörün içindeki tüm alt klasörleri ve dosyaları özyinelemeli (recursive) gezer
-    for root, dirs, files in os.walk(normalized_directory):
-        dirs[:] = [
-            directory
-            for directory in dirs
-            if not should_ignore_path(os.path.join(root, directory))
-        ]
+    for root, directories, files in os.walk(
+        normalized_directory,
+        followlinks=False,
+    ):
+        safe_directories = []
 
-        for file_name in files:
-            full_path = normalize_path(os.path.join(root, file_name))
+        for directory_name in directories:
+            full_path = normalize_path(
+                os.path.join(
+                    root,
+                    directory_name,
+                )
+            )
+
             if should_ignore_path(full_path):
                 continue
+
+            if os.path.islink(full_path):
+                try:
+                    baseline_data[full_path] = (
+                        scan_file(full_path)
+                    )
+                except (OSError, ValueError) as error:
+                    print(
+                        f"Symlink tarama hatası "
+                        f"({full_path}): {error}"
+                    )
+
+                continue
+
+            safe_directories.append(
+                directory_name
+            )
+
+        directories[:] = safe_directories
+
+        for file_name in files:
+            full_path = normalize_path(
+                os.path.join(
+                    root,
+                    file_name,
+                )
+            )
+
+            if should_ignore_path(full_path):
+                continue
+
             try:
-                baseline_data[full_path] = scan_file(full_path)
+                baseline_data[full_path] = (
+                    scan_file(full_path)
+                )
 
             except PermissionError:
-                print(f"Erişim engellendi (Yetki yok): {full_path}")
-            except Exception as e:
-                print(f"Tarama hatası ({full_path}): {str(e)}")
+                print(
+                    f"Erişim engellendi: {full_path}"
+                )
+
+            except (OSError, ValueError) as error:
+                print(
+                    f"Tarama hatası ({full_path}): "
+                    f"{error}"
+                )
 
     return baseline_data
 
 
-def scan_targets(targets: Iterable[str]) -> Dict[str, dict]:
-    """Scan a mixed selection of files and directories into one baseline."""
+def scan_targets(
+    targets: Iterable[str],
+) -> Dict[str, dict]:
+    """
+    Dosya, klasör ve symlink seçimlerini tek referans
+    durum altında birleştirir.
+    """
     baseline_data: Dict[str, dict] = {}
 
     for target in targets:
         normalized = normalize_path(target)
-        if not os.path.exists(normalized):
-            raise FileNotFoundError(f"Taranacak hedef bulunamadı: {normalized}")
+
+        if not os.path.lexists(normalized):
+            raise FileNotFoundError(
+                f"Taranacak hedef bulunamadı: "
+                f"{normalized}"
+            )
+
         if should_ignore_path(normalized):
             continue
-        if os.path.isdir(normalized):
-            baseline_data.update(scan_directory(normalized))
+
+        if os.path.islink(normalized):
+            baseline_data[normalized] = (
+                scan_file(normalized)
+            )
+
+        elif os.path.isdir(normalized):
+            baseline_data.update(
+                scan_directory(normalized)
+            )
+
         else:
-            baseline_data[normalized] = scan_file(normalized)
+            baseline_data[normalized] = (
+                scan_file(normalized)
+            )
 
     return baseline_data

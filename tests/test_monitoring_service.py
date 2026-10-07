@@ -236,6 +236,27 @@ class TestMonitoringService(unittest.TestCase):
                 "ERROR",
             )
 
+    def test_symlink_dizinini_dizin_olarak_siniflandirmaz(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(
+                os.path.join(directory, "test.db")
+            )
+            actual_directory = os.path.join(directory, "actual")
+            linked_directory = os.path.join(directory, "linked")
+            os.mkdir(actual_directory)
+            os.symlink(actual_directory, linked_directory)
+
+            service = MonitoringService(
+                database=database,
+                watcher_factory=FakeWatcher,
+            )
+            session_id = service.start([linked_directory])
+
+            session = database.get_monitoring_session(session_id)
+            self.assertEqual(session["targets"][0]["target_type"], "FILE")
+
+            service.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

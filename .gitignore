@@ -6,5 +6,5 @@ __pycache__/
 yula.db
 yula.db-shm
 yula.db-wal
-
+yula.db-agent.lock
 

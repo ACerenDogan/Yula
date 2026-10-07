@@ -86,7 +86,7 @@ class MonitoringService:
             if normalized in seen_paths:
                 continue
 
-            if not os.path.exists(normalized):
+            if not os.path.lexists(normalized):
                 raise FileNotFoundError(
                     f"İzleme hedefi bulunamadı: {normalized}"
                 )
@@ -100,6 +100,7 @@ class MonitoringService:
             target_type = (
                 "DIRECTORY"
                 if os.path.isdir(normalized)
+                and not os.path.islink(normalized)
                 else "FILE"
             )
 
@@ -218,9 +219,9 @@ class MonitoringService:
                 )
 
             raise
-
+ 
     def stop(self) -> None:
-        """Aktif izleme çalışmasını güvenli şekilde durdurur."""
+        """Aktif izleme çalışmasını güvenli şekilde durdurur"""
         if self._watcher is None or self._session_id is None:
             return
 

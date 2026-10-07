@@ -13,7 +13,15 @@ class RiskEngine:
     CRITICAL_FILENAMES = {".env"}
 
     @classmethod
-    def evaluate_file_event(cls, event_type: str, file_path: str, is_hash_changed: bool = False) -> Tuple[str, str]:
+    def evaluate_file_event(
+        cls,
+        event_type: str,
+        file_path: str,
+        is_hash_changed: bool = False,
+        previous_snapshot: dict | None = None,
+        current_snapshot: dict | None = None,
+        source_path: str | None = None,
+    ) -> Tuple[str, str]:
         """
         Dosya olayını inceleyip (Risk_Seviyesi, Açıklama) ikilisini döner.
         """
@@ -50,8 +58,71 @@ class RiskEngine:
             return "LOW", f"Dosya güvenilir referans içeriğine geri döndü: {filename}"
 
         elif event_type == "MOVED":
+            source_name = os.path.basename(source_path) if source_path else None
+            if source_name:
+                movement = f"{source_name} → {filename}"
+            else:
+                movement = filename
             if is_critical:
-                return "HIGH", f"Kritik dosya taşındı veya yeniden adlandırıldı: {filename}"
-            return "LOW", f"Dosya taşındı veya yeniden adlandırıldı: {filename}"
+                return "HIGH", f"Kritik dosya taşındı veya yeniden adlandırıldı: {movement}"
+            return "LOW", f"Dosya taşındı veya yeniden adlandırıldı: {movement}"
+
+        elif event_type == "PERMISSIONS_CHANGED":
+            previous_mode = (
+                previous_snapshot.get("mode")
+                if previous_snapshot
+                else None
+            )
+            current_mode = (
+                current_snapshot.get("mode")
+                if current_snapshot
+                else None
+            )
+            mode_text = ""
+            if previous_mode is not None and current_mode is not None:
+                mode_text = f" ({previous_mode:03o} → {current_mode:03o})"
+
+            newly_added_permissions = (
+                previous_mode is not None
+                and current_mode is not None
+                and (current_mode & ~previous_mode)
+            )
+            newly_writable_by_others = bool(
+                newly_added_permissions
+                and newly_added_permissions & 0o022
+            )
+            newly_executable = bool(
+                newly_added_permissions
+                and newly_added_permissions & 0o111
+            )
+
+            if newly_writable_by_others:
+                risk = "HIGH"
+            elif newly_executable or is_critical:
+                risk = "MEDIUM"
+            else:
+                risk = "LOW"
+
+            return risk, f"Dosya izinleri değişti{mode_text}: {filename}"
+
+        elif event_type == "OWNERSHIP_CHANGED":
+            risk = "HIGH" if is_critical else "MEDIUM"
+            return risk, f"Dosyanın sahibi veya grubu değişti: {filename}"
+
+        elif event_type == "SYMLINK_CHANGED":
+            return "HIGH", f"Sembolik bağlantının hedefi veya türü değişti: {filename}"
+
+        elif event_type == "POSSIBLE_COPY":
+            risk = "HIGH" if is_critical else "LOW"
+            source_name = os.path.basename(source_path) if source_path else "bilinmeyen kaynak"
+            return risk, f"Dosya kopyası oluşturuldu: {source_name} → {filename}"
+
+        elif event_type == "CLIPBOARD_COPY":
+            risk = "HIGH" if is_critical else "MEDIUM"
+            return risk, f"Dosya kopyalandı; yapıştırma hedefi henüz bilinmiyor: {filename}"
+
+        elif event_type == "CONTENT_CLIPBOARD_COPY":
+            risk = "HIGH" if is_critical else "MEDIUM"
+            return risk, f"Dosya içeriği kopyalandı: {filename}"
 
         return "LOW", f"Dosya olayı: {filename} ({event_type})"

@@ -25,6 +25,30 @@ class TestTurkishLabels(unittest.TestCase):
             event_type_label("MOVED"),
             "Taşındı / yeniden adlandırıldı",
         )
+        self.assertEqual(
+            event_type_label("PERMISSIONS_CHANGED"),
+            "İzinleri değişti",
+        )
+        self.assertEqual(
+            event_type_label("OWNERSHIP_CHANGED"),
+            "Sahibi / grubu değişti",
+        )
+        self.assertEqual(
+            event_type_label("SYMLINK_CHANGED"),
+            "Sembolik bağlantı değişti",
+        )
+        self.assertEqual(
+            event_type_label("POSSIBLE_COPY"),
+            "Dosya kopyası oluşturuldu",
+        )
+        self.assertEqual(
+            event_type_label("CLIPBOARD_COPY"),
+            "Dosya kopyalandı",
+        )
+        self.assertEqual(
+            event_type_label("CONTENT_CLIPBOARD_COPY"),
+            "İçerik kopyalandı",
+        )
 
     def test_calisma_durumlarini_turkcelestirir(self):
         self.assertEqual(session_status_label("PREPARING"), "Hazırlanıyor")

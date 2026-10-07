@@ -1,8 +1,10 @@
 import os
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Dict, List
 
 
@@ -33,6 +35,12 @@ class DatabaseManager:
         "DELETED",
         "RESTORED",
         "MOVED",
+        "PERMISSIONS_CHANGED",
+        "OWNERSHIP_CHANGED",
+        "SYMLINK_CHANGED",
+        "POSSIBLE_COPY",
+        "CLIPBOARD_COPY",
+        "CONTENT_CLIPBOARD_COPY",
     }
 
     RISK_LEVELS = {
@@ -40,6 +48,26 @@ class DatabaseManager:
         "MEDIUM",
         "HIGH",
     }
+
+    @staticmethod
+    def _normalize_last_modified_ns(value) -> int:
+        """
+        Eski saniye biçimini ve yeni nanosaniye biçimini
+        ortak nanosaniye değerine dönüştürür.
+        """
+        try:
+            numeric_value = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as error:
+            raise ValueError(
+                f"Geçersiz dosya zamanı: {value!r}"
+            ) from error
+
+        # Eski YULA zamanları Unix saniyesi olarak saklıyordu.
+        # Yeni YULA st_mtime_ns ile nanosaniye saklıyor.
+        if numeric_value < Decimal("10000000000"):
+            numeric_value *= Decimal("1000000000")
+
+        return int(numeric_value)
 
     def __init__(self, db_path: str = "yula.db"):
         self.db_path = os.path.abspath(
@@ -148,6 +176,11 @@ class DatabaseManager:
                     sha256_hash TEXT NOT NULL,
                     file_size INTEGER NOT NULL,
                     last_modified TEXT NOT NULL,
+                    file_mode INTEGER,
+                    owner_uid INTEGER,
+                    group_gid INTEGER,
+                    file_kind TEXT,
+                    symlink_target TEXT,
 
                     FOREIGN KEY (path_id)
                         REFERENCES monitored_paths(id)
@@ -156,6 +189,26 @@ class DatabaseManager:
                     UNIQUE(path_id, file_path)
                 )
             """)
+
+            baseline_columns = {
+                row["name"]
+                for row in cursor.execute(
+                    "PRAGMA table_info(file_baselines)"
+                ).fetchall()
+            }
+            baseline_column_definitions = {
+                "file_mode": "INTEGER",
+                "owner_uid": "INTEGER",
+                "group_gid": "INTEGER",
+                "file_kind": "TEXT",
+                "symlink_target": "TEXT",
+            }
+            for column_name, column_type in baseline_column_definitions.items():
+                if column_name not in baseline_columns:
+                    cursor.execute(
+                        f"ALTER TABLE file_baselines "
+                        f"ADD COLUMN {column_name} {column_type}"
+                    )
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS monitoring_sessions (
@@ -207,6 +260,22 @@ class DatabaseManager:
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS agent_control (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    desired_state TEXT NOT NULL CHECK (
+                        desired_state IN ('RUNNING', 'STOPPED')
+                    ),
+                    session_id INTEGER,
+                    process_id INTEGER,
+                    heartbeat_at TEXT,
+                    updated_at TEXT NOT NULL,
+
+                    FOREIGN KEY (session_id)
+                        REFERENCES monitoring_sessions(id)
+                )
+            """)
+
             event_columns = {
                 row["name"]
                 for row in cursor.execute(
@@ -221,10 +290,30 @@ class DatabaseManager:
                     REFERENCES monitoring_sessions(id)
                 """)
 
+            event_column_definitions = {
+                "source_path": "TEXT",
+                "details_json": "TEXT",
+                "actor_name": "TEXT",
+                "actor_source": "TEXT",
+            }
+
+            for column_name, column_type in event_column_definitions.items():
+                if column_name not in event_columns:
+                    cursor.execute(
+                        f"ALTER TABLE security_events "
+                        f"ADD COLUMN {column_name} {column_type}"
+                    )
+
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS
                 idx_security_events_session_id
                 ON security_events(session_id)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS
+                idx_security_events_timestamp
+                ON security_events(timestamp)
             """)
 
             connection.commit()
@@ -420,6 +509,41 @@ class DatabaseManager:
 
             return session
 
+    def list_monitoring_sessions(
+        self,
+        limit: int = 100,
+    ) -> List[Dict]:
+        """Son izleme çalışmalarını hedefleri ve olay sayılarıyla döndürür."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("Çalışma limiti pozitif bir tam sayı olmalıdır.")
+
+        with self._get_connection() as connection:
+            rows = connection.execute("""
+                SELECT
+                    monitoring_sessions.*,
+                    COUNT(security_events.id) AS event_count
+                FROM monitoring_sessions
+                LEFT JOIN security_events
+                    ON security_events.session_id = monitoring_sessions.id
+                GROUP BY monitoring_sessions.id
+                ORDER BY monitoring_sessions.id DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+
+            sessions = []
+            for row in rows:
+                session = dict(row)
+                target_rows = connection.execute("""
+                    SELECT target_path, target_type
+                    FROM session_targets
+                    WHERE session_id = ?
+                    ORDER BY id
+                """, (session["id"],)).fetchall()
+                session["targets"] = [dict(target) for target in target_rows]
+                sessions.append(session)
+
+            return sessions
+
     def add_monitored_path(self, path: str) -> int:
         """İzlenecek bir yolu kaydeder ve kayıt ID'sini döndürür."""
         absolute_path = os.path.abspath(path)
@@ -468,21 +592,36 @@ class DatabaseManager:
                         file_path,
                         sha256_hash,
                         file_size,
-                        last_modified
+                        last_modified,
+                        file_mode,
+                        owner_uid,
+                        group_gid,
+                        file_kind,
+                        symlink_target
                     )
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
                     ON CONFLICT(path_id, file_path)
                     DO UPDATE SET
                         sha256_hash = excluded.sha256_hash,
                         file_size = excluded.file_size,
-                        last_modified = excluded.last_modified
+                        last_modified = excluded.last_modified,
+                        file_mode = excluded.file_mode,
+                        owner_uid = excluded.owner_uid,
+                        group_gid = excluded.group_gid,
+                        file_kind = excluded.file_kind,
+                        symlink_target = excluded.symlink_target
                 """, (
                     path_id,
                     file_path,
                     data["hash"],
                     data["size"],
                     str(data["last_modified"]),
+                    data.get("mode"),
+                    data.get("uid"),
+                    data.get("gid"),
+                    data.get("kind"),
+                    data.get("symlink_target"),
                 ))
 
             connection.commit()
@@ -508,6 +647,119 @@ class DatabaseManager:
                 for row in cursor.fetchall()
             }
 
+    def get_baseline_snapshots_for_targets(
+        self,
+        targets: list[str],
+    ) -> Dict[str, dict]:
+        """Arka plan ajanının devam edebilmesi için kayıtlı görüntüleri döndürür."""
+        if not targets:
+            return {}
+
+        normalized_targets = [
+            os.path.abspath(os.path.expanduser(target))
+            for target in targets
+        ]
+        placeholders = ", ".join("?" for _ in normalized_targets)
+
+        with self._get_connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    file_path,
+                    sha256_hash,
+                    file_size,
+                    last_modified,
+                    file_mode,
+                    owner_uid,
+                    group_gid,
+                    file_kind,
+                    symlink_target
+                FROM file_baselines
+                INNER JOIN monitored_paths
+                    ON monitored_paths.id = file_baselines.path_id
+                WHERE monitored_paths.path IN ({placeholders})
+                """,
+                normalized_targets,
+            ).fetchall()
+
+        snapshots = {}
+        for row in rows:
+            snapshot = {
+                "hash": row["sha256_hash"],
+                "size": row["file_size"],
+                "last_modified": self._normalize_last_modified_ns(
+                    row["last_modified"]
+                ),
+            }
+            optional_values = {
+                "mode": row["file_mode"],
+                "uid": row["owner_uid"],
+                "gid": row["group_gid"],
+                "kind": row["file_kind"],
+                "symlink_target": row["symlink_target"],
+            }
+            snapshot.update({
+                key: value
+                for key, value in optional_values.items()
+                if value is not None
+            })
+            snapshot["is_symlink"] = snapshot.get("kind") == "SYMLINK"
+            snapshots[row["file_path"]] = snapshot
+
+        return snapshots
+
+    def request_agent_start(self, session_id: int) -> None:
+        """Arka plan ajanı için kalıcı çalışma isteği oluşturur."""
+        now = datetime.now().isoformat(timespec="milliseconds")
+        with self._get_connection() as connection:
+            connection.execute("""
+                INSERT INTO agent_control (
+                    id,
+                    desired_state,
+                    session_id,
+                    process_id,
+                    heartbeat_at,
+                    updated_at
+                )
+                VALUES (1, 'RUNNING', ?, NULL, NULL, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    desired_state = 'RUNNING',
+                    session_id = excluded.session_id,
+                    process_id = NULL,
+                    heartbeat_at = NULL,
+                    updated_at = excluded.updated_at
+            """, (session_id, now))
+
+    def request_agent_stop(self) -> None:
+        """Ajanın güvenli biçimde durması için kalıcı istek bırakır."""
+        now = datetime.now().isoformat(timespec="milliseconds")
+        with self._get_connection() as connection:
+            connection.execute("""
+                UPDATE agent_control
+                SET desired_state = 'STOPPED', updated_at = ?
+                WHERE id = 1
+            """, (now,))
+
+    def update_agent_heartbeat(self, process_id: int) -> None:
+        """Ajanın canlılık bilgisini günceller."""
+        now = datetime.now().isoformat(timespec="milliseconds")
+        with self._get_connection() as connection:
+            connection.execute("""
+                UPDATE agent_control
+                SET process_id = ?, heartbeat_at = ?, updated_at = ?
+                WHERE id = 1
+            """, (process_id, now, now))
+
+    def get_agent_state(self) -> Dict | None:
+        """Kalıcı ajan isteğini ve canlılık bilgisini döndürür."""
+        with self._get_connection() as connection:
+            row = connection.execute("""
+                SELECT *
+                FROM agent_control
+                WHERE id = 1
+            """).fetchone()
+            return dict(row) if row else None
+
     def log_security_event(
         self,
         event_type: str,
@@ -515,6 +767,10 @@ class DatabaseManager:
         target_path: str,
         description: str,
         session_id: int | None = None,
+        source_path: str | None = None,
+        details: dict | None = None,
+        actor_name: str | None = None,
+        actor_source: str | None = None,
     ) -> int:
         """Doğrulanmış güvenlik olayını veritabanına kaydeder."""
         if not isinstance(event_type, str):
@@ -570,6 +826,42 @@ class DatabaseManager:
 
         normalized_description = description.strip()
 
+        normalized_source_path = None
+        if source_path is not None:
+            if not isinstance(source_path, str) or not source_path.strip():
+                raise ValueError(
+                    "Kaynak yolu metin olmalı ve boş olmamalıdır."
+                )
+            normalized_source_path = os.path.abspath(
+                os.path.expanduser(source_path.strip())
+            )
+
+        if details is not None and not isinstance(details, dict):
+            raise ValueError("Olay ayrıntıları sözlük olmalıdır.")
+
+        details_json = (
+            json.dumps(
+                details,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if details is not None
+            else None
+        )
+
+        for field_name, field_value in (
+            ("Aktör adı", actor_name),
+            ("Aktör kaynağı", actor_source),
+        ):
+            if field_value is not None and (
+                not isinstance(field_value, str)
+                or not field_value.strip()
+            ):
+                raise ValueError(f"{field_name} boş bir metin olamaz.")
+
+        normalized_actor_name = actor_name.strip() if actor_name else None
+        normalized_actor_source = actor_source.strip() if actor_source else None
+
         if (
             session_id is not None
             and (
@@ -597,9 +889,13 @@ class DatabaseManager:
                     risk_level,
                     target_path,
                     description,
-                    session_id
+                    session_id,
+                    source_path,
+                    details_json,
+                    actor_name,
+                    actor_source
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp,
                 normalized_event_type,
@@ -607,6 +903,10 @@ class DatabaseManager:
                 normalized_target_path,
                 normalized_description,
                 session_id,
+                normalized_source_path,
+                details_json,
+                normalized_actor_name,
+                normalized_actor_source,
             ))
 
             event_id = cursor.lastrowid
@@ -617,6 +917,51 @@ class DatabaseManager:
                 )
 
             return event_id
+
+    def get_events_in_range(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+        session_id: int | None = None,
+    ) -> List[Dict]:
+        """Verilen tarih-saat aralığındaki olayları kronolojik döndürür."""
+        if not isinstance(start_at, datetime) or not isinstance(end_at, datetime):
+            raise ValueError("Rapor başlangıç ve bitişi tarih-saat olmalıdır.")
+        if start_at > end_at:
+            raise ValueError("Rapor başlangıcı bitişinden sonra olamaz.")
+
+        parameters: list[object] = [
+            start_at.isoformat(timespec="milliseconds"),
+            end_at.isoformat(timespec="milliseconds"),
+        ]
+        session_filter = ""
+        if session_id is not None:
+            session_filter = "AND session_id = ?"
+            parameters.append(session_id)
+
+        with self._get_connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM security_events
+                WHERE timestamp BETWEEN ? AND ?
+                {session_filter}
+                ORDER BY timestamp, id
+                """,
+                parameters,
+            ).fetchall()
+
+            events = []
+            for row in rows:
+                event = dict(row)
+                event["details"] = (
+                    json.loads(event["details_json"])
+                    if event.get("details_json")
+                    else None
+                )
+                events.append(event)
+
+            return events
 
     def get_recent_events(
         self,
@@ -680,6 +1025,9 @@ class DatabaseManager:
                         target_path,
                         description,
                         session_id,
+                        source_path,
+                        actor_name,
+                        actor_source,
 
                         ROW_NUMBER() OVER (
                             PARTITION BY target_path
@@ -727,6 +1075,9 @@ class DatabaseManager:
                     target_path,
                     description,
                     session_id,
+                    source_path,
+                    actor_name,
+                    actor_source,
                     event_count,
                     first_seen,
                     last_seen

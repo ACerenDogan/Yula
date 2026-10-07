@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
 )
 
 from yula.core.paths import normalize_path
+from yula.gui.branding import yula_icon
+from yula.gui.theme import APPLICATION_STYLESHEET
 
 
 class TargetSelectionDialog(QDialog):
@@ -29,6 +31,7 @@ class TargetSelectionDialog(QDialog):
         super().__init__(parent)
 
         self.setWindowTitle("İzleme Hedeflerini Seç")
+        self.setWindowIcon(yula_icon())
         self.setMinimumSize(680, 440)
         self.setModal(True)
 
@@ -115,45 +118,7 @@ class TargetSelectionDialog(QDialog):
 
         main_layout.addWidget(self.button_box)
 
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #f8fafc;
-            }
-
-            QLabel#dialogTitle {
-                color: #0f172a;
-                font-size: 22px;
-                font-weight: 700;
-            }
-
-            QLabel#dialogDescription {
-                color: #475569;
-                font-size: 13px;
-            }
-
-            QListWidget {
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                color: #0f172a;
-                padding: 6px;
-            }
-
-            QListWidget::item {
-                min-height: 32px;
-                padding-left: 6px;
-            }
-
-            QListWidget::item:selected {
-                background-color: #dbeafe;
-                color: #1e3a8a;
-            }
-
-            QPushButton {
-                min-height: 30px;
-                padding: 2px 14px;
-            }
-        """)
+        self.setStyleSheet(APPLICATION_STYLESHEET)
 
     def add_targets(
         self,

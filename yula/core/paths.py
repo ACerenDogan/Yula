@@ -19,6 +19,7 @@ IGNORED_FILE_NAMES = {
     "yula.db-journal",
     "yula.db-shm",
     "yula.db-wal",
+    "yula.db-agent.lock",
 }
 
 

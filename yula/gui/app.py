@@ -3,44 +3,54 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QLocale,
     QObject,
+    QSignalBlocker,
+    QSize,
     QThread,
     QTimer,
     Qt,
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QFont, QFontDatabase
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (
-    QAbstractItemView,
+    QAbstractSlider,
     QApplication,
-    QComboBox,
-    QFrame,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QPushButton,
-    QStackedWidget,
     QStyle,
-    QTreeWidget,
     QTreeWidgetItem,
-    QVBoxLayout,
-    QWidget,
 )
 
 from yula.application.monitoring_service import (
     MonitoringService,
 )
+from yula.application.agent_controller import BackgroundAgentController
+from yula.gui.branding import yula_icon
+from yula.gui.event_presenter import (
+    event_details_summary,
+    event_details_tooltip,
+    event_technical_summary,
+    session_status_icon,
+)
 from yula.gui.labels import (
     event_type_label,
     risk_label,
+    session_status_label,
 )
+from yula.gui.main_window_view import build_main_window
 from yula.gui.target_selection import (
     TargetSelectionDialog,
 )
+from yula.gui.report_dialog import ReportDialog
+from yula.gui.theme import (
+    APPLICATION_STYLESHEET,
+    risk_badge_stylesheet,
+    status_dot_stylesheet,
+)
+from yula.gui.time_format import format_tr_datetime
 from yula.storage.database import DatabaseManager
 
 
@@ -99,38 +109,10 @@ class MonitoringStartWorker(QObject):
 
 
 class YulaMainWindow(QMainWindow):
-    STATUS_STYLES = {
-        "WAITING": (
-            "#475569",
-            "#f1f5f9",
-            "#cbd5e1",
-        ),
-        "PREPARING": (
-            "#92400e",
-            "#fffbeb",
-            "#fde68a",
-        ),
-        "RUNNING": (
-            "#166534",
-            "#f0fdf4",
-            "#bbf7d0",
-        ),
-        "STOPPED": (
-            "#334155",
-            "#f8fafc",
-            "#cbd5e1",
-        ),
-        "ERROR": (
-            "#991b1b",
-            "#fef2f2",
-            "#fecaca",
-        ),
-    }
-
     def __init__(
         self,
         database: DatabaseManager | None = None,
-        service_factory=MonitoringService,
+        service_factory=BackgroundAgentController,
         show_startup_dialog: bool = True,
     ):
         super().__init__()
@@ -138,6 +120,7 @@ class YulaMainWindow(QMainWindow):
         self.setWindowTitle(
             "YULA — Dosya Bütünlüğü Denetim Paneli"
         )
+        self.setWindowIcon(yula_icon())
         self.resize(1180, 720)
         self.setMinimumSize(920, 600)
 
@@ -164,7 +147,10 @@ class YulaMainWindow(QMainWindow):
 
         self.current_session_id: int | None = None
         self.selected_targets: list[str] = []
+        self.selected_event_category = "ALL"
         self.expect_running = False
+        self._event_selection_is_manual = False
+        self._current_status_text = "Seçim bekleniyor"
 
         self._start_thread: QThread | None = None
         self._start_worker: MonitoringStartWorker | None = None
@@ -174,6 +160,23 @@ class YulaMainWindow(QMainWindow):
             "WAITING",
             "SEÇİM BEKLENİYOR",
         )
+
+        if self.service.is_running:
+            self.current_session_id = self.service.session_id
+            self.selected_targets = list(self.service.targets)
+            self.expect_running = True
+            self._update_target_summary()
+            self.session_label.setText(
+                f"İzleme çalışması #{self.current_session_id}"
+            )
+            self._set_status("RUNNING", "ARKA PLAN İZLEMESİ AKTİF")
+            self.select_targets_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+
+        self._refresh_sessions(
+            select_session_id=self.current_session_id,
+            select_latest=self.current_session_id is None,
+        )
         self._refresh_events()
 
         self.refresh_timer = QTimer(self)
@@ -182,462 +185,192 @@ class YulaMainWindow(QMainWindow):
         )
         self.refresh_timer.start(1000)
 
-        if show_startup_dialog:
+        if show_startup_dialog and not self.service.is_running:
             QTimer.singleShot(
                 0,
                 self._open_target_selection,
             )
 
     def _build_ui(self) -> None:
-        central_widget = QWidget()
-        central_widget.setObjectName("centralWidget")
-        self.setCentralWidget(central_widget)
+        build_main_window(self)
+    def _toggle_sessions_dock(self) -> None:
+        should_show = self.sessions_dock.isHidden()
+        self.sessions_dock.setVisible(should_show)
+        if should_show:
+            self._refresh_sessions(select_session_id=self.current_session_id)
 
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(28, 24, 28, 24)
-        main_layout.setSpacing(18)
+    @Slot(bool)
+    def _update_sessions_button_state(self, visible: bool) -> None:
+        self.sessions_button.setChecked(visible)
 
-        header_layout = QHBoxLayout()
+    def _refresh_sessions(
+        self,
+        select_session_id: int | None = None,
+        select_latest: bool = False,
+    ) -> None:
+        sessions = self.database.list_monitoring_sessions(limit=100)
+        scroll_bar = self.sessions_list.verticalScrollBar()
+        previous_scroll_position = scroll_bar.value()
+        wanted_id = select_session_id
+        if wanted_id is None and self.current_session_id is not None:
+            wanted_id = self.current_session_id
+        if wanted_id is None and select_latest and sessions:
+            wanted_id = sessions[0]["id"]
 
-        title_layout = QVBoxLayout()
-        title_layout.setSpacing(2)
+        self.sessions_list.blockSignals(True)
+        self.sessions_list.clear()
+        selected_item = None
 
-        title = QLabel("YULA")
-        title.setObjectName("applicationTitle")
-
-        subtitle = QLabel(
-            "Yerel dosya ve klasör değişikliklerini güvenilir referansa göre izler"
+        running_count = sum(
+            session["status"] in {"RUNNING", "PREPARING"}
+            for session in sessions
         )
-        subtitle.setObjectName("applicationSubtitle")
-
-        title_layout.addWidget(title)
-        title_layout.addWidget(subtitle)
-
-        header_layout.addLayout(title_layout)
-        header_layout.addStretch()
-
-        self.status_badge = QLabel()
-        self.status_badge.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
+        history_count = len(sessions) - running_count
+        self.sessions_summary.setText(
+            f"{running_count} etkin · {history_count} geçmiş çalışma"
+            if sessions
+            else "Henüz izleme çalışması yok"
         )
-        self.status_badge.setMinimumWidth(180)
-        self.status_badge.setMinimumHeight(38)
+        self.sessions_button.setText("Çalışmalar")
 
-        header_layout.addWidget(self.status_badge)
-        main_layout.addLayout(header_layout)
+        for session in sessions:
+            targets = session["targets"]
+            target_names = [
+                os.path.basename(target["target_path"]) or target["target_path"]
+                for target in targets
+            ]
+            target_text = ", ".join(target_names[:2]) or "Hedef yok"
+            if len(target_names) > 2:
+                target_text += f" +{len(target_names) - 2}"
+            item = QListWidgetItem(
+                f"Çalışma #{session['id']}\n"
+                f"{session_status_label(session['status'])} · "
+                f"{format_tr_datetime(session['started_at'], False)}\n"
+                f"{session['event_count']} olay · {target_text}"
+            )
+            item.setIcon(session_status_icon(session["status"]))
+            item.setSizeHint(QSize(0, 78))
+            item.setData(Qt.ItemDataRole.UserRole, session["id"])
+            item.setToolTip("\n".join(
+                target["target_path"] for target in targets
+            ))
+            self.sessions_list.addItem(item)
+            if session["id"] == wanted_id:
+                selected_item = item
 
-        control_frame = QFrame()
-        control_frame.setObjectName("controlFrame")
+        if selected_item is not None:
+            self.sessions_list.setCurrentItem(selected_item)
+        self.sessions_list.blockSignals(False)
+        scroll_bar.setValue(previous_scroll_position)
 
-        control_layout = QHBoxLayout(control_frame)
-        control_layout.setContentsMargins(18, 14, 18, 14)
-        control_layout.setSpacing(12)
+        if wanted_id is not None:
+            self._show_session(wanted_id, refresh_events=False)
 
-        target_layout = QVBoxLayout()
-        target_layout.setSpacing(2)
+    @Slot(QListWidgetItem, QListWidgetItem)
+    def _on_session_selected(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None,
+    ) -> None:
+        if current is None:
+            return
+        session_id = current.data(Qt.ItemDataRole.UserRole)
+        self._show_session(session_id)
 
-        target_title = QLabel("İzlenen hedefler")
-        target_title.setObjectName("sectionCaption")
-
-        self.target_summary = QLabel(
-            "Henüz dosya veya klasör seçilmedi."
+    def _show_session(
+        self,
+        session_id: int,
+        refresh_events: bool = True,
+    ) -> None:
+        session = self.database.get_monitoring_session(session_id)
+        if session is None:
+            return
+        self.current_session_id = session_id
+        self.selected_targets = [
+            target["target_path"] for target in session["targets"]
+        ]
+        self._update_target_summary()
+        session_text = (
+            f"Çalışma #{session_id} · "
+            f"{session_status_label(session['status'])} · "
+            f"{format_tr_datetime(session['started_at'], False)}"
         )
-        self.target_summary.setObjectName("targetSummary")
-        self.target_summary.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
+        self.session_label.setText(session_text)
+        self.session_label.setToolTip(session_text)
+        status_texts = {
+            "PREPARING": "REFERANS DURUM HAZIRLANIYOR",
+            "RUNNING": "İZLEME AKTİF",
+            "STOPPED": "İZLEME DURDURULDU",
+            "ERROR": "İZLEME HATASI",
+        }
+        self._set_status(
+            session["status"],
+            status_texts[session["status"]],
         )
+        if refresh_events:
+            self._refresh_events()
 
-        target_layout.addWidget(target_title)
-        target_layout.addWidget(self.target_summary)
-
-        control_layout.addLayout(target_layout)
-        control_layout.addStretch()
-
-        self.select_targets_button = QPushButton(
-            "Dosya veya Klasör Seç"
-        )
-        self.select_targets_button.setObjectName(
-            "primaryButton"
-        )
-        self.select_targets_button.clicked.connect(
-            self._open_target_selection
-        )
-
-        self.stop_button = QPushButton(
-            "İzlemeyi Durdur"
-        )
-        self.stop_button.setObjectName("dangerButton")
-        self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(
-            self._stop_monitoring
-        )
-
-        control_layout.addWidget(
-            self.select_targets_button
-        )
-        control_layout.addWidget(self.stop_button)
-
-        main_layout.addWidget(control_frame)
-
-        event_header_layout = QHBoxLayout()
-
-        event_title_layout = QVBoxLayout()
-        event_title_layout.setSpacing(2)
-
-        event_title = QLabel("Dosya değişiklikleri")
-        event_title.setObjectName("sectionTitle")
-
-        event_description = QLabel(
-            "Bir dosya satırını açarak o dosyanın "
-            "değişiklik geçmişini inceleyin."
-        )
-        event_description.setObjectName(
-            "sectionDescription"
-        )
-
-        event_title_layout.addWidget(event_title)
-        event_title_layout.addWidget(
-            event_description
-        )
-
-        self.session_label = QLabel(
-            "Aktif çalışma yok"
-        )
-        self.session_label.setObjectName("sessionLabel")
-
-        event_header_layout.addLayout(
-            event_title_layout
-        )
-        event_header_layout.addStretch()
-        event_header_layout.addWidget(
-            self.session_label
-        )
-
-        main_layout.addLayout(event_header_layout)
-
-        filter_frame = QFrame()
-        filter_frame.setObjectName("filterFrame")
-
-        filter_layout = QHBoxLayout(filter_frame)
-        filter_layout.setContentsMargins(12, 10, 12, 10)
-        filter_layout.setSpacing(10)
-
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText(
-            "Dosya adı, yol veya açıklama ara"
-        )
-        self.search_input.setClearButtonEnabled(True)
-        self.search_input.textChanged.connect(
-            self._refresh_events
-        )
-
-        self.risk_filter = QComboBox()
-        self.risk_filter.addItem(
-            "Tüm risk düzeyleri",
-            None,
-        )
-        self.risk_filter.addItem("Yüksek", "HIGH")
-        self.risk_filter.addItem("Orta", "MEDIUM")
-        self.risk_filter.addItem("Düşük", "LOW")
-        self.risk_filter.currentIndexChanged.connect(
-            self._refresh_events
-        )
-
-        filter_layout.addWidget(self.search_input, 1)
-        filter_layout.addWidget(self.risk_filter)
-
-        main_layout.addWidget(filter_frame)
-
-        self.table = QTreeWidget()
-        self.table.setObjectName("eventTree")
-        self.table.setColumnCount(5)
-        self.table.setHeaderLabels([
-            "Son olay",
-            "En yüksek risk",
-            "Son işlem",
-            "Dosya / hedef",
-            "Özet",
-        ])
-
-        self.table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        self.table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
-        )
-        self.table.setAlternatingRowColors(True)
-        self.table.setRootIsDecorated(True)
-        self.table.setItemsExpandable(True)
-        self.table.setAnimated(True)
-        self.table.setIndentation(22)
-        self.table.setExpandsOnDoubleClick(True)
-
-        header = self.table.header()
-
-        header.setSectionResizeMode(
-            0,
-            QHeaderView.ResizeMode.ResizeToContents,
-        )
-        header.setSectionResizeMode(
-            1,
-            QHeaderView.ResizeMode.ResizeToContents,
-        )
-        header.setSectionResizeMode(
-            2,
-            QHeaderView.ResizeMode.ResizeToContents,
-        )
-        header.setSectionResizeMode(
-            3,
-            QHeaderView.ResizeMode.ResizeToContents,
-        )
-        header.setSectionResizeMode(
-            4,
-            QHeaderView.ResizeMode.Stretch,
-        )
-
-        self.empty_state = QFrame()
-        self.empty_state.setObjectName("emptyState")
-
-        empty_layout = QVBoxLayout(self.empty_state)
-        empty_layout.setContentsMargins(32, 48, 32, 48)
-        empty_layout.setSpacing(8)
-        empty_layout.addStretch()
-
-        self.empty_title = QLabel(
-            "İzleme henüz başlamadı"
-        )
-        self.empty_title.setObjectName("emptyTitle")
-        self.empty_title.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-
-        self.empty_description = QLabel(
-            "Başlamak için yukarıdan bir dosya veya "
-            "klasör seçin."
-        )
-        self.empty_description.setObjectName(
-            "emptyDescription"
-        )
-        self.empty_description.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-        self.empty_description.setWordWrap(True)
-
-        empty_layout.addWidget(self.empty_title)
-        empty_layout.addWidget(
-            self.empty_description
-        )
-        empty_layout.addStretch()
-
-        self.event_stack = QStackedWidget()
-        self.event_stack.addWidget(self.empty_state)
-        self.event_stack.addWidget(self.table)
-
-        main_layout.addWidget(self.event_stack, 1)
-
-        footer_layout = QHBoxLayout()
-
-        self.event_count_label = QLabel(
-            "0 olay görüntüleniyor"
-        )
-        self.event_count_label.setObjectName("footerLabel")
-
-        self.refresh_button = QPushButton("Yenile")
-        self.refresh_button.clicked.connect(
-            self._refresh_events
-        )
-
-        footer_layout.addWidget(
-            self.event_count_label
-        )
-        footer_layout.addStretch()
-        footer_layout.addWidget(self.refresh_button)
-
-        main_layout.addLayout(footer_layout)
-
-        self.setStyleSheet("""
-            QWidget#centralWidget {
-                background-color: #f8fafc;
-            }
-
-            QLabel#applicationTitle {
-                color: #0f172a;
-                font-size: 25px;
-                font-weight: 750;
-            }
-
-            QLabel#applicationSubtitle {
-                color: #64748b;
-                font-size: 13px;
-            }
-
-            QFrame#controlFrame {
-                background-color: #ffffff;
-                border: 1px solid #e2e8f0;
-                border-radius: 8px;
-            }
-
-            QLabel#sectionCaption {
-                color: #64748b;
-                font-size: 11px;
-                font-weight: 650;
-            }
-
-            QLabel#targetSummary {
-                color: #0f172a;
-                font-size: 13px;
-            }
-
-            QLabel#sectionTitle {
-                color: #0f172a;
-                font-size: 16px;
-                font-weight: 700;
-            }
-
-            QLabel#sectionDescription {
-                color: #64748b;
-                font-size: 12px;
-            }
-
-            QLabel#sessionLabel,
-            QLabel#footerLabel {
-                color: #64748b;
-                font-size: 12px;
-            }
-
-            QPushButton {
-                background-color: #ffffff;
-                color: #0f172a;
-                border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                min-height: 32px;
-                padding: 2px 16px;
-            }
-
-            QPushButton:hover {
-                background-color: #f1f5f9;
-                border-color: #94a3b8;
-            }
-
-            QPushButton:disabled {
-                color: #94a3b8;
-                background-color: #f8fafc;
-            }
-
-            QPushButton#dangerButton {
-                color: #991b1b;
-                border-color: #fecaca;
-            }
-
-            QPushButton#primaryButton {
-                color: #ffffff;
-                background-color: #1d4ed8;
-                border-color: #1d4ed8;
-                font-weight: 650;
-            }
-
-            QPushButton#primaryButton:hover {
-                background-color: #1e40af;
-                border-color: #1e40af;
-            }
-
-            QPushButton#primaryButton:disabled {
-                color: #dbeafe;
-                background-color: #93c5fd;
-                border-color: #93c5fd;
-            }
-
-            QFrame#filterFrame {
-                background-color: #ffffff;
-                border: 1px solid #e2e8f0;
-                border-radius: 7px;
-            }
-
-            QLineEdit,
-            QComboBox {
-                min-height: 32px;
-                color: #0f172a;
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                padding: 0 10px;
-            }
-
-            QLineEdit:focus,
-            QComboBox:focus {
-                border-color: #2563eb;
-            }
-
-            QTreeWidget#eventTree {
-                background-color: #ffffff;
-                color: #0f172a;
-                border: 1px solid #e2e8f0;
-                border-radius: 7px;
-                selection-background-color: #dbeafe;
-                selection-color: #172554;
-                outline: none;
-            }
-
-            QTreeWidget#eventTree::item {
-                min-height: 36px;
-                border-bottom: 1px solid #f1f5f9;
-            }
-
-            QTreeWidget#eventTree::item:hover {
-                background-color: #eff6ff;
-            }
-
-            QFrame#emptyState {
-                background-color: #ffffff;
-                border: 1px dashed #cbd5e1;
-                border-radius: 8px;
-            }
-
-            QLabel#emptyTitle {
-                color: #0f172a;
-                font-size: 17px;
-                font-weight: 700;
-            }
-
-            QLabel#emptyDescription {
-                color: #64748b;
-                font-size: 13px;
-            }
-
-            QHeaderView::section {
-                background-color: #f1f5f9;
-                color: #475569;
-                border: none;
-                border-bottom: 1px solid #cbd5e1;
-                padding: 9px;
-                font-weight: 650;
-            }
-        """)
+    def _refresh_all(self) -> None:
+        self._refresh_sessions(select_session_id=self.current_session_id)
+        self._refresh_events()
 
     def _set_status(
         self,
         status: str,
         text: str,
     ) -> None:
-        foreground, background, border = (
-            self.STATUS_STYLES[status]
+        self.sidebar_status_label.setText(text)
+        self.status_dot.setStyleSheet(status_dot_stylesheet(status))
+        self._current_status_text = (
+            text.replace("İZLEME", "İzleme").lower().capitalize()
         )
+        self._update_header_breadcrumb()
 
-        self.status_badge.setText(text)
-        self.status_badge.setStyleSheet(f"""
-            QLabel {{
-                color: {foreground};
-                background-color: {background};
-                border: 1px solid {border};
-                border-radius: 7px;
-                padding: 7px 14px;
-                font-size: 12px;
-                font-weight: 700;
-            }}
-        """)
+    @Slot(bool)
+    def _set_live_follow(self, enabled: bool) -> None:
+        self.live_follow_button.setText(
+            "● Canlı" if enabled else "○ Duraklatıldı"
+        )
+        if enabled:
+            self._event_selection_is_manual = False
+            self.table.verticalScrollBar().setValue(
+                self.table.verticalScrollBar().minimum()
+            )
+            self._refresh_events()
+
+    @Slot()
+    def _disable_live_follow(self) -> None:
+        if not self.live_follow_button.isChecked():
+            return
+        blocker = QSignalBlocker(self.live_follow_button)
+        self.live_follow_button.setChecked(False)
+        self.live_follow_button.setText("○ Duraklatıldı")
+        del blocker
+
+    @Slot(int)
+    def _on_event_scroll_position_changed(self, value: int) -> None:
+        scroll_bar = self.table.verticalScrollBar()
+        if value > scroll_bar.minimum() or self.live_follow_button.isChecked():
+            return
+        blocker = QSignalBlocker(self.live_follow_button)
+        self.live_follow_button.setChecked(True)
+        self.live_follow_button.setText("● Canlı")
+        del blocker
+        self._event_selection_is_manual = False
+
+    @Slot(int)
+    def _on_event_scroll_action(self, action: int) -> None:
+        if action == QAbstractSlider.SliderAction.SliderToMinimum.value:
+            return
+        self._disable_live_follow()
+
+    def _open_report_dialog(self) -> None:
+        dialog = ReportDialog(
+            database=self.database,
+            session_id=self.current_session_id,
+            parent=self,
+        )
+        dialog.exec()
 
     def _open_target_selection(self) -> None:
         if self.service.is_running:
@@ -663,22 +396,31 @@ class YulaMainWindow(QMainWindow):
         self._begin_monitoring()
 
     def _update_target_summary(self) -> None:
-        target_count = len(self.selected_targets)
-
-        if target_count == 0:
-            text = "Henüz dosya veya klasör seçilmedi."
+        if not self.selected_targets:
             tooltip = ""
-
-        elif target_count == 1:
-            text = self.selected_targets[0]
-            tooltip = self.selected_targets[0]
-
         else:
-            text = f"{target_count} hedef seçildi"
             tooltip = "\n".join(self.selected_targets)
-
-        self.target_summary.setText(text)
         self.target_summary.setToolTip(tooltip)
+        self._update_header_breadcrumb()
+
+    def _update_header_breadcrumb(self) -> None:
+        if not self.selected_targets:
+            target_text = "Hedef seçilmedi"
+        else:
+            target_path = self.selected_targets[0]
+            user_home = os.path.expanduser("~")
+            if target_path == user_home:
+                target_text = "~"
+            elif target_path.startswith(f"{user_home}{os.sep}"):
+                target_text = f"~{target_path[len(user_home):]}"
+            else:
+                target_text = target_path
+            if len(self.selected_targets) > 1:
+                target_text += f" · +{len(self.selected_targets) - 1} hedef"
+
+        self.target_summary.setText(
+            f"📁 {target_text} · Durum: {self._current_status_text}"
+        )
 
     def _begin_monitoring(self) -> None:
         if not self.selected_targets:
@@ -745,6 +487,7 @@ class YulaMainWindow(QMainWindow):
         self.select_targets_button.setEnabled(False)
         self.stop_button.setEnabled(True)
 
+        self._refresh_sessions(select_session_id=session_id)
         self._refresh_events()
 
     @Slot(str)
@@ -761,6 +504,8 @@ class YulaMainWindow(QMainWindow):
 
         self.select_targets_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+
+        self._refresh_sessions(select_session_id=self.current_session_id)
 
         QMessageBox.critical(
             self,
@@ -803,6 +548,7 @@ class YulaMainWindow(QMainWindow):
         self.select_targets_button.setEnabled(True)
         self.stop_button.setEnabled(False)
 
+        self._refresh_sessions(select_session_id=self.current_session_id)
         self._refresh_events()
 
     @Slot(dict)
@@ -833,8 +579,207 @@ class YulaMainWindow(QMainWindow):
             self.select_targets_button.setEnabled(True)
             self.stop_button.setEnabled(False)
 
+    def _selected_category_types(self) -> set[str] | None:
+        categories = {
+            "COPIES": {
+                "CLIPBOARD_COPY",
+                "CONTENT_CLIPBOARD_COPY",
+                "POSSIBLE_COPY",
+            },
+            "CHANGES": {"MODIFIED", "CREATED", "RESTORED", "MOVED"},
+            "DELETIONS": {"DELETED"},
+            "AUTHORITY": {
+                "PERMISSIONS_CHANGED",
+                "OWNERSHIP_CHANGED",
+                "SYMLINK_CHANGED",
+            },
+        }
+        return categories.get(self.selected_event_category)
+
+    def _set_event_category(self, category: str) -> None:
+        self.selected_event_category = category
+        selected_action = self.event_filter_actions.get(category)
+        if selected_action is not None:
+            selected_action.setChecked(True)
+            self.event_filter_button.setToolTip(
+                f"Olay türü filtresi: {selected_action.text()}"
+            )
+        self._refresh_events()
+
+    def _event_matches_filters(self, event: dict) -> bool:
+        selected_types = self._selected_category_types()
+        if selected_types is not None and event["event_type"] not in selected_types:
+            return False
+
+        selected_risk = self.risk_filter.currentData()
+        if selected_risk is not None and event["risk_level"] != selected_risk:
+            return False
+
+        search_term = self.search_input.text().strip().casefold()
+        if not search_term:
+            return True
+        searchable_text = " ".join((
+            event.get("target_path") or "",
+            event.get("source_path") or "",
+            event.get("description") or "",
+            event_type_label(event["event_type"]),
+            event_details_summary(event),
+        )).casefold()
+        return search_term in searchable_text
+
+    def _set_event_item_values(
+        self,
+        item: QTreeWidgetItem,
+        event: dict,
+    ) -> None:
+        target_path = event.get("target_path") or ""
+        source_path = event.get("source_path")
+        if source_path:
+            path_text = (
+                f"{os.path.basename(source_path)} → "
+                f"{os.path.basename(target_path)}"
+            )
+            path_tooltip = f"Kaynak: {source_path}\nHedef: {target_path}"
+        else:
+            path_text = os.path.basename(target_path) or target_path
+            path_tooltip = target_path
+
+        item.setData(0, Qt.ItemDataRole.UserRole, event)
+        item.setText(0, format_tr_datetime(event["timestamp"]))
+        item.setText(1, risk_label(event["risk_level"]))
+        item.setData(
+            1,
+            Qt.ItemDataRole.UserRole + 1,
+            event["risk_level"],
+        )
+        item.setText(2, event_type_label(event["event_type"]))
+        item.setText(3, path_text)
+        item.setIcon(
+            3,
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon),
+        )
+        item.setToolTip(3, path_tooltip)
+        path_font = item.font(3)
+        available_families = set(QFontDatabase.families())
+        for family in (
+            "SF Mono",
+            "Menlo",
+            "Consolas",
+            "DejaVu Sans Mono",
+        ):
+            if family in available_families:
+                path_font.setFamily(family)
+                break
+        path_font.setPointSize(11)
+        item.setFont(3, path_font)
+        item.setText(4, event_details_summary(event))
+        item.setToolTip(4, event_details_tooltip(event))
+        item.setText(5, event.get("actor_name") or "Belirlenemedi")
+        item.setToolTip(
+            5,
+            "Olay sırasında etkin olan kullanıcı hesabıdır; "
+            "işlemi yapan kişiyi tek başına kanıtlamaz.",
+        )
+        item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+
     def _refresh_events(self) -> None:
+        if self.current_session_id is None:
+            all_events = []
+        else:
+            all_events = self.database.get_recent_events(
+                limit=1000,
+                session_id=self.current_session_id,
+            )
+
+        if self.event_view_tabs.currentIndex() == 0:
+            self._refresh_timeline_events(all_events)
+        else:
+            self._refresh_grouped_events()
+
+    def _refresh_timeline_events(self, all_events: list[dict]) -> None:
+        scroll_bar = self.table.verticalScrollBar()
+        previous_scroll_position = scroll_bar.value()
+        was_at_top = previous_scroll_position <= scroll_bar.minimum() + 1
+        live_follow = self.live_follow_button.isChecked()
+        scroll_signal_blocker = QSignalBlocker(scroll_bar)
+        selected_event_id = None
+        current_item = self.table.currentItem()
+        if current_item is not None and self._event_selection_is_manual:
+            current_event = current_item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(current_event, dict):
+                selected_event_id = current_event.get("id")
+
+        events = [
+            event for event in all_events if self._event_matches_filters(event)
+        ]
+        self.table.clear()
+        self.table.setRootIsDecorated(False)
+
+        if events:
+            self.event_stack.setCurrentWidget(self.table)
+        else:
+            self.event_stack.setCurrentWidget(self.empty_state)
+            if self.current_session_id is None:
+                self.empty_title.setText("İzleme başlatılmadı")
+                self.empty_description.setText(
+                    "Dosya veya klasör seçerek başlayın."
+                )
+            elif all_events:
+                self.empty_title.setText("Eşleşen olay bulunamadı")
+                self.empty_description.setText(
+                    "Olay türü, arama veya risk filtresini değiştirin."
+                )
+            else:
+                self.empty_title.setText("Olay bekleniyor")
+                self.empty_description.setText(
+                    "İlk değişiklik burada görünecek."
+                )
+
+        item_to_select = None
+        for event in events:
+            item = QTreeWidgetItem(self.table)
+            self._set_event_item_values(item, event)
+            if event.get("id") == selected_event_id:
+                item_to_select = item
+
+        should_follow_latest = live_follow or (
+            was_at_top and selected_event_id is None
+        )
+        if item_to_select is None and events and should_follow_latest:
+            item_to_select = self.table.topLevelItem(0)
+        if item_to_select is not None:
+            blocker = QSignalBlocker(self.table)
+            self.table.setCurrentItem(item_to_select)
+            del blocker
+
+        if should_follow_latest:
+            scroll_bar.setValue(scroll_bar.minimum())
+        else:
+            scroll_bar.setValue(
+                min(previous_scroll_position, scroll_bar.maximum())
+            )
+        del scroll_signal_blocker
+
+        if len(events) == len(all_events):
+            count_text = f"{len(events)} olay görüntüleniyor"
+        else:
+            count_text = f"{len(events)} / {len(all_events)} olay eşleşiyor"
+        self.event_count_label.setText(count_text)
+
+    def _refresh_grouped_events(self) -> None:
+        scroll_bar = self.table.verticalScrollBar()
+        previous_scroll_position = scroll_bar.value()
+        was_at_top = previous_scroll_position <= scroll_bar.minimum() + 1
+        live_follow = self.live_follow_button.isChecked()
+        scroll_signal_blocker = QSignalBlocker(scroll_bar)
+        self.table.setRootIsDecorated(True)
         expanded_targets = set()
+        selected_event_id = None
+        selected_item = self.table.currentItem()
+        if selected_item is not None and self._event_selection_is_manual:
+            selected_event = selected_item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(selected_event, dict):
+                selected_event_id = selected_event.get("id")
 
         for index in range(
             self.table.topLevelItemCount()
@@ -857,33 +802,36 @@ class YulaMainWindow(QMainWindow):
                 limit=100,
             )
 
-        search_term = (
-            self.search_input.text().strip().casefold()
-        )
-        selected_risk = self.risk_filter.currentData()
-
         groups = []
 
-        for group in all_groups:
-            searchable_text = " ".join((
-                group["target_path"] or "",
-                group["description"] or "",
-                event_type_label(group["event_type"]),
-            )).casefold()
-
-            if (
-                search_term
-                and search_term not in searchable_text
-            ):
+        risk_scores = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+        for stored_group in all_groups:
+            matching_events = [
+                event
+                for event in self.database.get_events_for_target(
+                    session_id=self.current_session_id,
+                    target_path=stored_group["target_path"],
+                    limit=200,
+                )
+                if self._event_matches_filters(event)
+            ]
+            if not matching_events:
                 continue
-
-            if (
-                selected_risk is not None
-                and group["highest_risk"]
-                != selected_risk
-            ):
-                continue
-
+            latest_event = matching_events[0]
+            group = dict(stored_group)
+            group.update({
+                "id": latest_event["id"],
+                "last_seen": latest_event["timestamp"],
+                "event_type": latest_event["event_type"],
+                "description": latest_event["description"],
+                "actor_name": latest_event.get("actor_name"),
+                "event_count": len(matching_events),
+                "highest_risk": max(
+                    (event["risk_level"] for event in matching_events),
+                    key=risk_scores.get,
+                ),
+                "events": matching_events,
+            })
             groups.append(group)
 
         self.table.clear()
@@ -899,11 +847,10 @@ class YulaMainWindow(QMainWindow):
 
             if self.current_session_id is None:
                 self.empty_title.setText(
-                    "İzleme henüz başlamadı"
+                    "İzleme başlatılmadı"
                 )
                 self.empty_description.setText(
-                    "Başlamak için yukarıdan bir dosya "
-                    "veya klasör seçin."
+                    "Dosya veya klasör seçerek başlayın."
                 )
             elif all_groups:
                 self.empty_title.setText(
@@ -915,25 +862,14 @@ class YulaMainWindow(QMainWindow):
                 )
             else:
                 self.empty_title.setText(
-                    "Henüz güvenlik olayı yok"
+                    "Olay bekleniyor"
                 )
                 self.empty_description.setText(
-                    "İzleme aktif. Seçtiğiniz hedeflerdeki "
-                    "değişiklikler burada görünecek."
+                    "İlk değişiklik burada görünecek."
                 )
 
-        risk_colors = {
-            "HIGH": "#dc2626",
-            "MEDIUM": "#d97706",
-            "LOW": "#15803d",
-        }
-        risk_backgrounds = {
-            "HIGH": "#fef2f2",
-            "MEDIUM": "#fffbeb",
-            "LOW": "#f0fdf4",
-        }
-
         total_event_count = 0
+        event_item_to_select = None
 
         for group in groups:
             target_path = group["target_path"] or ""
@@ -945,10 +881,7 @@ class YulaMainWindow(QMainWindow):
             event_count = group["event_count"]
             total_event_count += event_count
 
-            last_seen = group["last_seen"].replace(
-                "T",
-                " ",
-            )
+            last_seen = format_tr_datetime(group["last_seen"])
 
             group_item = QTreeWidgetItem(
                 self.table
@@ -959,9 +892,14 @@ class YulaMainWindow(QMainWindow):
                 1,
                 risk_label(group["highest_risk"]),
             )
+            group_item.setData(
+                1,
+                Qt.ItemDataRole.UserRole + 1,
+                group["highest_risk"],
+            )
             group_item.setText(
                 2,
-                event_type_label(group["event_type"]),
+                f"{event_count} olay",
             )
             group_item.setText(3, target_name)
             group_item.setIcon(
@@ -972,9 +910,9 @@ class YulaMainWindow(QMainWindow):
             )
             group_item.setText(
                 4,
-                f"{event_count} olay · "
-                f"{group['description']}",
+                event_details_summary(group["events"][0]),
             )
+            group_item.setText(5, "")
 
             group_item.setData(
                 3,
@@ -987,32 +925,12 @@ class YulaMainWindow(QMainWindow):
             )
             group_item.setToolTip(
                 4,
-                "Dosyanın olay geçmişini görmek için "
-                "satırı açın.",
+                event_details_tooltip(group["events"][0]),
             )
             group_item.setTextAlignment(
                 1,
                 Qt.AlignmentFlag.AlignCenter,
             )
-            group_item.setForeground(
-                1,
-                QColor(
-                    risk_colors.get(
-                        group["highest_risk"],
-                        "#475569",
-                    )
-                ),
-            )
-            group_item.setBackground(
-                1,
-                QColor(
-                    risk_backgrounds.get(
-                        group["highest_risk"],
-                        "#ffffff",
-                    )
-                ),
-            )
-
             for column in range(
                 self.table.columnCount()
             ):
@@ -1027,73 +945,41 @@ class YulaMainWindow(QMainWindow):
                     group_font,
                 )
 
-                if column != 1:
-                    group_item.setBackground(
-                        column,
-                        QColor("#f8fafc"),
-                    )
-
-            events = (
-                self.database.get_events_for_target(
-                    session_id=self.current_session_id,
-                    target_path=target_path,
-                    limit=200,
-                )
-            )
+            events = group["events"]
 
             for event in events:
-                timestamp = event["timestamp"].replace(
-                    "T",
-                    " ",
-                )
-
                 event_item = QTreeWidgetItem(
                     group_item
                 )
+                self._set_event_item_values(event_item, event)
 
-                event_item.setText(0, timestamp)
-                event_item.setText(
-                    1,
-                    risk_label(event["risk_level"]),
-                )
-                event_item.setText(
-                    2,
-                    event_type_label(
-                        event["event_type"]
-                    ),
-                )
-                event_item.setText(3, "")
-                event_item.setText(
-                    4,
-                    event["description"],
-                )
-
-                event_item.setTextAlignment(
-                    1,
-                    Qt.AlignmentFlag.AlignCenter,
-                )
-                event_item.setForeground(
-                    1,
-                    QColor(
-                        risk_colors.get(
-                            event["risk_level"],
-                            "#475569",
-                        )
-                    ),
-                )
-                event_item.setBackground(
-                    1,
-                    QColor(
-                        risk_backgrounds.get(
-                            event["risk_level"],
-                            "#ffffff",
-                        )
-                    ),
-                )
+                if event.get("id") == selected_event_id:
+                    event_item_to_select = event_item
 
             group_item.setExpanded(
                 target_path in expanded_targets
+                or group["event_type"] in {
+                    "CLIPBOARD_COPY",
+                    "CONTENT_CLIPBOARD_COPY",
+                    "POSSIBLE_COPY",
+                }
             )
+
+        if event_item_to_select is not None:
+            blocker = QSignalBlocker(self.table)
+            self.table.setCurrentItem(event_item_to_select)
+            del blocker
+
+        should_follow_latest = live_follow or (
+            was_at_top and selected_event_id is None
+        )
+        if should_follow_latest:
+            scroll_bar.setValue(scroll_bar.minimum())
+        else:
+            scroll_bar.setValue(
+                min(previous_scroll_position, scroll_bar.maximum())
+            )
+        del scroll_signal_blocker
 
         if len(groups) != len(all_groups):
             count_text = (
@@ -1107,6 +993,54 @@ class YulaMainWindow(QMainWindow):
             )
 
         self.event_count_label.setText(count_text)
+
+    @Slot(QTreeWidgetItem, int)
+    def _show_selected_event_details(
+        self,
+        current: QTreeWidgetItem | None,
+        _column: int = 0,
+    ) -> None:
+        if current is None:
+            self.event_inspector_dock.hide()
+            return
+
+        event = current.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(event, dict):
+            self._event_selection_is_manual = False
+            self.event_inspector_dock.hide()
+            return
+
+        self._disable_live_follow()
+        self._event_selection_is_manual = True
+
+        target_path = event.get("target_path") or "Belirlenemedi"
+        target_name = os.path.basename(target_path) or target_path
+        self.event_detail_title.setText(target_name)
+        risk = event.get("risk_level", "LOW")
+        self.event_detail_risk.setText(risk_label(risk))
+        self.event_detail_risk.setStyleSheet(risk_badge_stylesheet(risk))
+        self.event_detail_summary.setText(event_details_summary(event))
+        self.event_detail_time.setText(
+            format_tr_datetime(event.get("timestamp"))
+        )
+        self.event_detail_path.setText(target_path)
+        self.event_detail_path.setToolTip(target_path)
+        self.event_detail_change.setText(
+            event_type_label(event["event_type"])
+        )
+
+        technical = event_technical_summary(event)
+        self.event_detail_hash.setText(technical["hash"])
+        context_parts = [
+            f"Kullanıcı: {event.get('actor_name') or 'Belirlenemedi'}",
+            f"Kimlik kaynağı: {event.get('actor_source') or 'Kaydedilmedi'}",
+            f"Olay süreç PID'i: {technical['process_id']}",
+        ]
+        if event.get("source_path"):
+            context_parts.append(f"Kaynak dosya: {event['source_path']}")
+        self.event_detail_context.setText("\n".join(context_parts))
+        self.event_inspector_dock.show()
+        self.event_inspector_dock.raise_()
 
     def closeEvent(self, event) -> None:
         if (
@@ -1122,18 +1056,21 @@ class YulaMainWindow(QMainWindow):
             event.ignore()
             return
 
-        if self.service.is_running:
-            try:
-                self.service.stop()
-            except Exception:
-                pass
-
+        # İzleme GUI'den bağımsız ajan sürecinde devam eder. Yalnızca
+        # "İzlemeyi Durdur" düğmesi kalıcı çalışma isteğini sonlandırır.
         event.accept()
 
 
 def start_gui() -> None:
     application = QApplication(sys.argv)
     application.setStyle("Fusion")
+    application.setWindowIcon(yula_icon())
+    application.setStyleSheet(APPLICATION_STYLESHEET)
+    turkish_locale = QLocale(
+        QLocale.Language.Turkish,
+        QLocale.Country.Turkey,
+    )
+    QLocale.setDefault(turkish_locale)
     configure_application_font(application)
 
     window = YulaMainWindow()

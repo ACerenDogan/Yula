@@ -2,11 +2,45 @@ import os
 import stat
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 from yula.storage.database import DatabaseManager
 
 
 class TestDatabaseManager(unittest.TestCase):
+
+    def test_eski_baseline_zamanini_nanosaniyeye_cevirir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(
+                os.path.join(directory, "test.db")
+            )
+            monitored_file = os.path.join(
+                directory,
+                "legacy.txt",
+            )
+
+            path_id = database.add_monitored_path(directory)
+            database.save_baseline_records(
+                path_id,
+                {
+                    monitored_file: {
+                        "hash": "legacy-hash",
+                        "size": 10,
+                        "last_modified": "1765538916.28403",
+                    }
+                },
+            )
+
+            snapshots = (
+                database.get_baseline_snapshots_for_targets(
+                    [directory]
+                )
+            )
+
+            self.assertEqual(
+                snapshots[monitored_file]["last_modified"],
+                1765538916284030000,
+            )
     def test_baglanti_foreign_key_kontrolunu_etkinlestirir(self):
         with tempfile.TemporaryDirectory() as directory:
             database = DatabaseManager(
@@ -438,6 +472,85 @@ class TestDatabaseManager(unittest.TestCase):
             self.assertEqual(
                 database.get_recent_events(),
                 [],
+            )
+
+    def test_olay_ayrintilarini_ve_kaynak_yolunu_saklar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(os.path.join(directory, "test.db"))
+            session_id = database.create_monitoring_session([
+                {"path": directory, "type": "DIRECTORY"}
+            ])
+
+            database.log_security_event(
+                event_type="POSSIBLE_COPY",
+                risk_level="LOW",
+                target_path=os.path.join(directory, "copy.txt"),
+                source_path=os.path.join(directory, "source.txt"),
+                description="Olası kopya",
+                details={"detection": "HASH_MATCH"},
+                actor_name="ceren",
+                actor_source="CONSOLE_CONTEXT",
+                session_id=session_id,
+            )
+
+            event = database.get_recent_events(session_id=session_id)[0]
+            self.assertEqual(event["actor_name"], "ceren")
+            self.assertEqual(event["actor_source"], "CONSOLE_CONTEXT")
+            self.assertTrue(event["source_path"].endswith("source.txt"))
+            self.assertIn("HASH_MATCH", event["details_json"])
+
+    def test_tarih_saat_araligindaki_olaylari_getirir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(os.path.join(directory, "test.db"))
+            session_id = database.create_monitoring_session([
+                {"path": directory, "type": "DIRECTORY"}
+            ])
+            before = datetime.now() - timedelta(seconds=1)
+            database.log_security_event(
+                event_type="CREATED",
+                risk_level="LOW",
+                target_path=os.path.join(directory, "new.txt"),
+                description="Yeni dosya",
+                session_id=session_id,
+            )
+            after = datetime.now() + timedelta(seconds=1)
+
+            events = database.get_events_in_range(before, after)
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "CREATED")
+
+            with self.assertRaises(ValueError):
+                database.get_events_in_range(after, before)
+
+    def test_izleme_calismalarini_hedefleri_ve_olay_sayisiyla_listeler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseManager(os.path.join(directory, "test.db"))
+            first_session = database.create_monitoring_session([
+                {"path": "/project/first.py", "type": "FILE"}
+            ])
+            second_session = database.create_monitoring_session([
+                {"path": "/project/second", "type": "DIRECTORY"}
+            ])
+            database.log_security_event(
+                event_type="MODIFIED",
+                risk_level="LOW",
+                target_path="/project/first.py",
+                description="Değişiklik",
+                session_id=first_session,
+            )
+
+            sessions = database.list_monitoring_sessions()
+
+            self.assertEqual(
+                [session["id"] for session in sessions],
+                [second_session, first_session],
+            )
+            self.assertEqual(sessions[0]["event_count"], 0)
+            self.assertEqual(sessions[1]["event_count"], 1)
+            self.assertEqual(
+                sessions[1]["targets"][0]["target_path"],
+                "/project/first.py",
             )
 
 
